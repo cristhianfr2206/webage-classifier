@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -137,3 +138,35 @@ class QueueStatusResponse(BaseModel):
 class WorkerHealthResponse(BaseModel):
     healthy: bool
     workers: list[str]
+
+
+class BrowserInspectionRequest(BaseModel):
+    capture_screenshot: bool = False
+
+
+class BrowserInspectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    run_id: uuid.UUID
+    status: str
+    trigger: str
+    attempts: int
+    max_attempts: int
+    cancel_requested: bool
+    duration_ms: int | None
+    rendered_final_url: str | None
+    rendered_title: str
+    rendered_text_sample: str
+    request_count: int
+    transferred_byte_count: int
+    blocked_request_count: int
+    failure_code: str | None
+    artifact_id: str | None
+    artifact_expires_at: datetime | None
+    browser_version: str | None
+    playwright_version: str | None
+
+
+class BrowserRequestResponse(BaseModel):
+    run: ClassificationRunResponse
+    browser: BrowserInspectionResponse

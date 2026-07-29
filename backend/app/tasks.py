@@ -11,13 +11,15 @@ from celery.signals import task_failure
 from redis import Redis
 from sqlalchemy import select
 
+from app.browser_queueing import dispatch_browser
+from app.browser_service import create_automatic_browser_fallback
 from app.celery_app import celery_app
 from app.classification_service import CancelledJob, execute_classification
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.inspector import InspectionError
 from app.job_control import DomainLock, retry_delay, should_retry
-from app.models import ClassificationRun, RunStatus, Website
+from app.models import BrowserStatus, ClassificationRun, QueueName, RunStatus, Website
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -33,6 +35,22 @@ async def _domain_for_run(run_id: uuid.UUID) -> str | None:
 async def _execute(run_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
         await execute_classification(db, settings, run_id)
+
+
+async def _enqueue_browser_fallback(run_id: uuid.UUID) -> None:
+    async with SessionLocal() as db:
+        inspection = await create_automatic_browser_fallback(db, settings, run_id)
+        if inspection is not None:
+            try:
+                await dispatch_browser(inspection, QueueName.BROWSER)
+            except Exception:
+                inspection.status = BrowserStatus.FAILED
+                inspection.failure_code = "enqueue_failed"
+                run = await db.get(ClassificationRun, inspection.run_id)
+                if run is not None:
+                    run.status = RunStatus.FAILED
+                    run.error_code = "enqueue_failed"
+                await db.commit()
 
 
 async def _record_failure(
@@ -97,6 +115,7 @@ def classify_website(self: Task, run_id_value: str) -> None:
         _retry(self, run_id, "domain_locked")
     try:
         _run(_execute(run_id))
+        _run(_enqueue_browser_fallback(run_id))
     except CancelledJob:
         return
     except InspectionError as exc:

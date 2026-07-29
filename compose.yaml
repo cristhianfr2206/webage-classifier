@@ -51,6 +51,8 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - browser_artifacts:/artifacts
 
   worker-realtime:
     build:
@@ -90,6 +92,103 @@ services:
     command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-Q", "maintenance", "-n", "maintenance@%h", "--loglevel=INFO", "--concurrency=1"]
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping -d maintenance@$$HOSTNAME --timeout=2 | grep -q pong"]
+
+  worker-browser-realtime:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.browser
+    restart: unless-stopped
+    command: ["celery", "-A", "app.browser_celery_app:browser_celery_app", "worker", "-Q", "browser_realtime", "-n", "browser_realtime@%h", "--loglevel=INFO", "--concurrency=${BROWSER_WORKER_CONCURRENCY:-1}"]
+    environment: &browser_environment
+      HOME: /tmp
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      BROWSER_REDIS_URL: ${BROWSER_REDIS_URL:-redis://redis:6379/1}
+      SECRET_KEY: browser-worker-has-no-session-secret-000000
+      INITIAL_ADMIN_EMAIL: browser-worker@example.com
+      INITIAL_ADMIN_PASSWORD: browser-worker-unused-password
+      ALLOWED_ORIGINS: '["http://invalid"]'
+      ALLOWED_HOSTS: '["invalid"]'
+      BROWSER_WORKER_CONCURRENCY: ${BROWSER_WORKER_CONCURRENCY:-1}
+      BROWSER_CONTEXTS_PER_WORKER: ${BROWSER_CONTEXTS_PER_WORKER:-1}
+      BROWSER_NAVIGATION_TIMEOUT_SECONDS: ${BROWSER_NAVIGATION_TIMEOUT_SECONDS:-15}
+      BROWSER_TASK_SOFT_TIME_LIMIT_SECONDS: ${BROWSER_TASK_SOFT_TIME_LIMIT_SECONDS:-40}
+      BROWSER_TASK_HARD_TIME_LIMIT_SECONDS: ${BROWSER_TASK_HARD_TIME_LIMIT_SECONDS:-50}
+      BROWSER_MAX_REDIRECTS: ${BROWSER_MAX_REDIRECTS:-5}
+      BROWSER_MAX_REQUESTS: ${BROWSER_MAX_REQUESTS:-100}
+      BROWSER_MAX_TRANSFERRED_BYTES: ${BROWSER_MAX_TRANSFERRED_BYTES:-5000000}
+      BROWSER_MAX_TEXT_CHARACTERS: ${BROWSER_MAX_TEXT_CHARACTERS:-50000}
+      BROWSER_MAX_HEADINGS: ${BROWSER_MAX_HEADINGS:-100}
+      BROWSER_MAX_LINKS: ${BROWSER_MAX_LINKS:-250}
+      BROWSER_MAX_BUTTONS: ${BROWSER_MAX_BUTTONS:-100}
+      BROWSER_SCREENSHOT_ENABLED: ${BROWSER_SCREENSHOT_ENABLED:-false}
+      BROWSER_SCREENSHOT_WIDTH: ${BROWSER_SCREENSHOT_WIDTH:-1280}
+      BROWSER_SCREENSHOT_HEIGHT: ${BROWSER_SCREENSHOT_HEIGHT:-720}
+      BROWSER_SCREENSHOT_MAX_BYTES: ${BROWSER_SCREENSHOT_MAX_BYTES:-2000000}
+      BROWSER_ARTIFACT_ROOT: /artifacts
+      BROWSER_ARTIFACT_RETENTION_HOURS: ${BROWSER_ARTIFACT_RETENTION_HOURS:-24}
+      BROWSER_MAX_RETRIES: ${BROWSER_MAX_RETRIES:-2}
+      BROWSER_CONFIDENCE_THRESHOLD: ${BROWSER_CONFIDENCE_THRESHOLD:-45}
+      BROWSER_MIN_STATIC_TEXT_CHARACTERS: ${BROWSER_MIN_STATIC_TEXT_CHARACTERS:-300}
+      BROWSER_CHROMIUM_MAX_TASKS: ${BROWSER_CHROMIUM_MAX_TASKS:-25}
+      DOMAIN_LOCK_TTL_SECONDS: ${DOMAIN_LOCK_TTL_SECONDS:-90}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [internal, browser-egress]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    shm_size: 128m
+    volumes:
+      - browser_artifacts:/artifacts
+    pids_limit: 128
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 1.0
+    stop_grace_period: 65s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.browser_celery_app:browser_celery_app inspect ping -d browser_realtime@$$HOSTNAME --timeout=3 | grep -q pong"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 30s
+
+  worker-browser:
+    extends:
+      service: worker-browser-realtime
+    command: ["celery", "-A", "app.browser_celery_app:browser_celery_app", "worker", "-Q", "browser", "-n", "browser@%h", "--loglevel=INFO", "--concurrency=${BROWSER_WORKER_CONCURRENCY:-1}"]
+    environment:
+      <<: *browser_environment
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.browser_celery_app:browser_celery_app inspect ping -d browser@$$HOSTNAME --timeout=3 | grep -q pong"]
+
+  worker-browser-maintenance:
+    extends:
+      service: worker-browser-realtime
+    command: ["celery", "-A", "app.browser_celery_app:browser_celery_app", "worker", "-Q", "maintenance", "-n", "browser_maintenance@%h", "--loglevel=INFO", "--concurrency=1"]
+    environment:
+      <<: *browser_environment
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.browser_celery_app:browser_celery_app inspect ping -d browser_maintenance@$$HOSTNAME --timeout=3 | grep -q pong"]
+
+  browser-scheduler:
+    extends:
+      service: worker-browser-realtime
+    command: ["celery", "-A", "app.browser_celery_app:browser_celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/browser-celerybeat-schedule"]
+    environment:
+      <<: *browser_environment
+      DATABASE_URL: sqlite+aiosqlite:////tmp/browser-unused.db
+    pids_limit: 32
+    mem_limit: 192m
+    mem_reservation: 64m
+    cpus: 0.25
+    healthcheck:
+      disable: true
 
   frontend:
     build:
@@ -135,11 +234,48 @@ services:
     volumes:
       - ./backend:/app
 
+  browser-security-test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.browser
+    profiles: [tools]
+    network_mode: none
+    user: browser
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 1.0
+    shm_size: 128m
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    environment:
+      HOME: /tmp
+      DATABASE_URL: sqlite+aiosqlite://
+      SECRET_KEY: test-secret-key-that-is-at-least-thirty-two-bytes
+      INITIAL_ADMIN_EMAIL: admin@example.com
+      INITIAL_ADMIN_PASSWORD: long-test-password
+      ALLOWED_ORIGINS: '["http://testserver"]'
+      ALLOWED_HOSTS: '["testserver"]'
+    volumes:
+      - ./backend:/app:ro
+    command:
+      - sh
+      - -c
+      - >-
+        pytest tests/test_browser_security.py tests/test_browser_jobs.py
+        -p no:cacheprovider &&
+        pytest -m browser_integration tests/test_browser_playwright_integration.py
+        -p no:cacheprovider
+
 networks:
   internal:
     internal: true
   public:
+  browser-egress:
 
 volumes:
   postgres_data:
   redis_data:
+  browser_artifacts:

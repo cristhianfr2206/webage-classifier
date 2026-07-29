@@ -1,4 +1,4 @@
-.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco worker-status queue-status
+.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco worker-status queue-status browser-worker-status browser-security-test
 
 build:
 	docker compose build
@@ -38,3 +38,9 @@ worker-status:
 
 queue-status:
 	docker compose exec redis redis-cli --scan --pattern 'celery*'
+
+browser-worker-status:
+	docker compose exec backend celery -A app.browser_celery_app:browser_celery_app inspect ping
+
+browser-security-test:
+	docker compose run --rm browser-security-test

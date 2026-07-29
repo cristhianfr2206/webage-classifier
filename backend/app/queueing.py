@@ -32,6 +32,10 @@ def redis_client(settings: Settings) -> Redis:
     return cast(Redis, Redis.from_url(settings.redis_url, decode_responses=True))
 
 
+def browser_redis_client(settings: Settings) -> Redis:
+    return cast(Redis, Redis.from_url(settings.browser_redis_url, decode_responses=True))
+
+
 async def enforce_enqueue_rate(settings: Settings, user_id: uuid.UUID) -> None:
     client = redis_client(settings)
     key = f"rate:enqueue:{user_id}"
@@ -47,6 +51,25 @@ async def enforce_enqueue_rate(settings: Settings, user_id: uuid.UUID) -> None:
         await client.aclose()
     if count > settings.enqueue_rate_limit:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Enqueue rate limit exceeded")
+
+
+async def enforce_browser_enqueue_rate(settings: Settings, user_id: uuid.UUID) -> None:
+    client = browser_redis_client(settings)
+    key = f"rate:browser-enqueue:{user_id}"
+    try:
+        count = await client.incr(key)
+        if count == 1:
+            await client.expire(key, settings.enqueue_rate_window_seconds)
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Browser queue unavailable"
+        ) from exc
+    finally:
+        await client.aclose()
+    if count > settings.browser_enqueue_rate_limit:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "Browser enqueue rate limit exceeded"
+        )
 
 
 async def enforce_capacity(db: AsyncSession, settings: Settings) -> None:
@@ -96,14 +119,21 @@ async def queue_snapshot(db: AsyncSession, settings: Settings) -> QueueSnapshot:
         .where(ClassificationRun.status.in_(ACTIVE_STATUSES))
     )
     client = redis_client(settings)
+    browser_client = browser_redis_client(settings)
     try:
         await client.ping()
+        await browser_client.ping()
         queue_sizes = {}
         for queue in QueueName:
+            selected = (
+                browser_client
+                if queue in {QueueName.BROWSER, QueueName.BROWSER_REALTIME}
+                else client
+            )
             size = 0
-            async for key in client.scan_iter(match=f"{queue.value}*"):
-                if await client.type(key) == "list":
-                    value = await client.execute_command(  # type: ignore[no-untyped-call]
+            async for key in selected.scan_iter(match=f"{queue.value}*"):
+                if await selected.type(key) == "list":
+                    value = await selected.execute_command(  # type: ignore[no-untyped-call]
                         "LLEN", key
                     )
                     size += int(value)
@@ -114,4 +144,5 @@ async def queue_snapshot(db: AsyncSession, settings: Settings) -> QueueSnapshot:
         redis_ok = False
     finally:
         await client.aclose()
+        await browser_client.aclose()
     return QueueSnapshot(redis_ok, int(active or 0), queue_sizes)

@@ -30,11 +30,24 @@ class QueueName(str, enum.Enum):
     REALTIME = "realtime"
     STANDARD = "standard"
     MAINTENANCE = "maintenance"
+    BROWSER_REALTIME = "browser_realtime"
+    BROWSER = "browser"
 
 
 class ClassificationSource(str, enum.Enum):
     RULES = "rules"
+    RENDERED = "rendered"
+    SCREENSHOT = "screenshot"
     MANUAL = "manual"
+
+
+class BrowserStatus(str, enum.Enum):
+    PENDING = "pending"
+    RETRYING = "retrying"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class User(Base):
@@ -173,3 +186,40 @@ class WebsiteClassification(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class BrowserInspection(Base):
+    __tablename__ = "browser_inspections"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    status: Mapped[BrowserStatus] = mapped_column(
+        Enum(BrowserStatus, name="browser_status"), default=BrowserStatus.PENDING, index=True
+    )
+    trigger: Mapped[str] = mapped_column(String(40))
+    task_id: Mapped[str | None] = mapped_column(String(50), unique=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    rendered_final_url: Mapped[str | None] = mapped_column(String(2048))
+    rendered_title: Mapped[str] = mapped_column(String(500), default="")
+    rendered_text_sample: Mapped[str] = mapped_column(String(50000), default="")
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
+    transferred_byte_count: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_request_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    artifact_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    artifact_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    browser_version: Mapped[str | None] = mapped_column(String(80))
+    playwright_version: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    run: Mapped[ClassificationRun] = relationship()

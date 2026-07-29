@@ -30,3 +30,14 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     ? (undefined as T)
     : ((await response.json()) as T);
 }
+
+export type BrowserInspection = {
+  id: string;
+  run_id: string;
+  status: string;
+  trigger: string;
+  rendered_title: string;
+  rendered_text_sample: string;
+  failure_code: string | null;
+  artifact_id: string | null;
+};

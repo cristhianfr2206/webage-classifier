@@ -2,6 +2,7 @@ import asyncio
 
 from fastapi import APIRouter
 
+from app.browser_celery_app import browser_celery_app
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.dependencies import AdminUser, Db
@@ -23,6 +24,11 @@ async def queues(_: AdminUser, db: Db) -> QueueStatusResponse:
 
 @router.get("/workers", response_model=WorkerHealthResponse)
 async def workers(_: AdminUser) -> WorkerHealthResponse:
-    replies = await asyncio.to_thread(celery_app.control.inspect(timeout=1.0).ping)
-    names = sorted(replies or {})
-    return WorkerHealthResponse(healthy=bool(names), workers=names)
+    normal, browser = await asyncio.gather(
+        asyncio.to_thread(celery_app.control.inspect(timeout=1.0).ping),
+        asyncio.to_thread(browser_celery_app.control.inspect(timeout=1.0).ping),
+    )
+    names = sorted(set(normal or {}) | set(browser or {}))
+    required = ("realtime@", "standard@", "maintenance@", "browser_realtime@", "browser@")
+    healthy = all(any(name.startswith(prefix) for name in names) for prefix in required)
+    return WorkerHealthResponse(healthy=healthy, workers=names)

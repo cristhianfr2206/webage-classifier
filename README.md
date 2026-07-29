@@ -1,6 +1,6 @@
-# WebAge Classifier — Milestones 1–3
+# WebAge Classifier — Milestones 1–4
 
-A local-only system for administering website age-classification categories and policies. Milestone 3 adds persistent PostgreSQL-backed jobs and Redis/Celery execution across realtime, standard, and maintenance queues. Browser automation, screenshots, and AI classification remain intentionally out of scope.
+A local-only system for administering website age-classification categories and policies. Milestone 4 adds an HTTP-first, isolated browser fallback with dedicated queues, bounded rendered extraction, and optional private screenshots. AI classification remains intentionally out of scope.
 
 ## Prerequisites
 
@@ -43,6 +43,7 @@ make format
 make lint
 make typecheck
 make test
+docker compose run --rm browser-security-test
 make compose-config
 docker compose ps
 curl -fsS http://localhost:8000/health
@@ -119,6 +120,28 @@ make queue-status
 ```
 
 Cancellation is cooperative for an in-flight request: the PostgreSQL flag prevents result persistence, while queued tasks are revoked without abruptly terminating a worker.
+
+## Milestone 4 browser fallback
+
+Static HTTP inspection remains the default. A new browser run is created only for insufficient static content, likely JavaScript rendering, low rule confidence, or an explicit administrator request. Playwright runs exclusively in the `worker-browser-realtime` and `worker-browser` containers; the normal `realtime` and `standard` workers never launch Chromium.
+
+Browser requests are intercepted and validated with the centralized SSRF policy. Initial navigation, redirects, subframes, scripts, styles, images, fonts, XHR/fetch, WebSockets, popups, and worker requests are treated as hostile. DNS and IP validation, re-resolution, request interception, redirect checks, and container isolation provide layered best-effort protection but cannot make DNS-rebinding protection perfect.
+
+```text
+POST   /api/browser/websites/{website_id}/reinspect
+GET    /api/browser/runs/{inspection_id}
+POST   /api/browser/runs/{inspection_id}/cancel
+GET    /api/browser/artifacts/{artifact_id}
+DELETE /api/browser/artifacts/{artifact_id}
+```
+
+Screenshots are disabled by default. When enabled, policy permits them only for explicit requests or configured low-confidence/manual-review/high-risk evidence. Images use opaque IDs in a private Docker volume, expire automatically, and are streamed through authenticated backend authorization. They are never stored in PostgreSQL or served from a public directory.
+
+Browser contexts are fresh and nonpersistent. Downloads, popups, service workers, non-HTTP schemes, permissions, extensions, authentication automation, and persistent profiles are blocked. The system does not bypass CAPTCHAs, logins, paywalls, access controls, bot defenses, or geographic restrictions.
+
+`docker compose run --rm browser-security-test` runs the browser security unit tests and the marked real-Chromium suite against randomized, process-local fixture ports. The fixture container has no Docker network and the test-only exact-origin validator is supplied by dependency injection; production settings cannot enable it. `make browser-security-test` is an optional wrapper when GNU Make is installed.
+
+See [the browser worker guide](docs/browser-worker-operations.md), [security threat model](docs/security-threat-model.md), [screenshot retention guide](docs/screenshot-retention.md), and [WSL2 guidance](docs/wsl2-browser-resources.md).
 
 ## Streaming Tranco import
 

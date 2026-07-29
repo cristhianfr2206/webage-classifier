@@ -31,6 +31,30 @@ class Settings(BaseSettings):
     enqueue_rate_limit: int = Field(default=20, ge=1, le=1000)
     enqueue_rate_window_seconds: int = Field(default=60, ge=10, le=3600)
     bulk_enqueue_limit: int = Field(default=1000, ge=1, le=10000)
+    browser_redis_url: str = "redis://redis:6379/1"
+    browser_worker_concurrency: int = Field(default=1, ge=1, le=4)
+    browser_contexts_per_worker: int = Field(default=1, ge=1, le=4)
+    browser_navigation_timeout_seconds: int = Field(default=15, ge=2, le=60)
+    browser_task_soft_time_limit_seconds: int = Field(default=40, ge=10, le=180)
+    browser_task_hard_time_limit_seconds: int = Field(default=50, ge=15, le=240)
+    browser_max_redirects: int = Field(default=5, ge=0, le=10)
+    browser_max_requests: int = Field(default=100, ge=5, le=1000)
+    browser_max_transferred_bytes: int = Field(default=5_000_000, ge=1024, le=50_000_000)
+    browser_max_text_characters: int = Field(default=50_000, ge=1000, le=200_000)
+    browser_max_headings: int = Field(default=100, ge=1, le=1000)
+    browser_max_links: int = Field(default=250, ge=1, le=2000)
+    browser_max_buttons: int = Field(default=100, ge=1, le=1000)
+    browser_screenshot_enabled: bool = False
+    browser_screenshot_width: int = Field(default=1280, ge=320, le=2560)
+    browser_screenshot_height: int = Field(default=720, ge=240, le=4096)
+    browser_screenshot_max_bytes: int = Field(default=2_000_000, ge=1024, le=10_000_000)
+    browser_artifact_root: str = "/artifacts"
+    browser_artifact_retention_hours: int = Field(default=24, ge=1, le=720)
+    browser_max_retries: int = Field(default=2, ge=0, le=5)
+    browser_confidence_threshold: int = Field(default=45, ge=0, le=100)
+    browser_min_static_text_characters: int = Field(default=300, ge=0, le=10000)
+    browser_enqueue_rate_limit: int = Field(default=5, ge=1, le=100)
+    browser_chromium_max_tasks: int = Field(default=25, ge=1, le=1000)
 
     @field_validator("allowed_origins", "allowed_hosts", mode="before")
     @classmethod
@@ -52,12 +76,18 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL must use an async SQLAlchemy driver")
         if not self.allowed_origins or not self.allowed_hosts:
             raise ValueError("origin and host allowlists cannot be empty")
-        if not self.redis_url.startswith(("redis://", "rediss://")):
-            raise ValueError("REDIS_URL must use redis:// or rediss://")
+        if not self.redis_url.startswith(
+            ("redis://", "rediss://")
+        ) or not self.browser_redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("Redis URLs must use redis:// or rediss://")
         if self.task_soft_time_limit_seconds >= self.task_hard_time_limit_seconds:
             raise ValueError("task soft time limit must be lower than hard time limit")
         if self.domain_lock_ttl_seconds <= self.task_hard_time_limit_seconds:
             raise ValueError("domain lock TTL must exceed the hard task time limit")
+        if self.browser_task_soft_time_limit_seconds >= self.browser_task_hard_time_limit_seconds:
+            raise ValueError("browser soft time limit must be lower than browser hard time limit")
+        if self.domain_lock_ttl_seconds <= self.browser_task_hard_time_limit_seconds:
+            raise ValueError("domain lock TTL must exceed the browser hard task time limit")
         return self
 
 

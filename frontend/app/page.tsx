@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { api } from "../lib/api";
+import React, { FormEvent, useEffect, useState } from "react";
+import { api, BrowserInspection } from "../lib/api";
 
 type User = { id: string; email: string; role: "admin" | "viewer" };
 type Category = { id: string; name: string; slug: string; description: string };
@@ -20,6 +20,7 @@ export default function Home() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [browserRun, setBrowserRun] = useState<BrowserInspection | null>(null);
 
   async function loadData(current: User) {
     setUser(current);
@@ -59,6 +60,28 @@ export default function Home() {
   async function logout() {
     await api<void>("/api/auth/logout", { method: "POST" });
     setUser(null);
+  }
+
+  async function requestBrowser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const data = new FormData(event.currentTarget);
+    try {
+      const response = await api<{ browser: BrowserInspection }>(
+        `/api/browser/websites/${encodeURIComponent(String(data.get("website_id")))}/reinspect`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            capture_screenshot: data.get("capture_screenshot") === "on",
+          }),
+        },
+      );
+      setBrowserRun(response.browser);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Browser inspection failed",
+      );
+    }
   }
 
   if (loading) return <main className="center">Loading…</main>;
@@ -150,6 +173,34 @@ export default function Home() {
           </ul>
         </article>
       </section>
+      {user.role === "admin" && (
+        <section className="card">
+          <h2>Browser reinspection</h2>
+          <p>
+            Browser work runs on isolated workers and does not replace a valid
+            classification unless it completes successfully.
+          </p>
+          <form onSubmit={requestBrowser}>
+            <label>
+              Website ID
+              <input name="website_id" required pattern="[0-9a-fA-F-]{36}" />
+            </label>
+            <label>
+              <input name="capture_screenshot" type="checkbox" />
+              Capture screenshot when server policy permits
+            </label>
+            <button type="submit">Request browser inspection</button>
+          </form>
+          {browserRun && (
+            <div aria-live="polite">
+              <strong>Status: {browserRun.status}</strong>
+              <p>{browserRun.rendered_title}</p>
+              <p>{browserRun.rendered_text_sample}</p>
+            </div>
+          )}
+          {error && <p role="alert">{error}</p>}
+        </section>
+      )}
     </main>
   );
 }
