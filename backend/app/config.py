@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     inspector_max_response_bytes: int = Field(default=1_000_000, ge=1024, le=5_000_000)
     inspector_max_text_characters: int = Field(default=50_000, ge=1000, le=200_000)
     inspector_max_redirects: int = Field(default=5, ge=0, le=10)
+    redis_url: str = "redis://redis:6379/0"
+    celery_worker_concurrency: int = Field(default=2, ge=1, le=32)
+    task_soft_time_limit_seconds: int = Field(default=45, ge=10, le=300)
+    task_hard_time_limit_seconds: int = Field(default=60, ge=15, le=360)
+    task_max_retries: int = Field(default=3, ge=0, le=9)
+    domain_lock_ttl_seconds: int = Field(default=90, ge=30, le=600)
+    max_active_jobs: int = Field(default=10000, ge=10, le=1000000)
+    enqueue_rate_limit: int = Field(default=20, ge=1, le=1000)
+    enqueue_rate_window_seconds: int = Field(default=60, ge=10, le=3600)
+    bulk_enqueue_limit: int = Field(default=1000, ge=1, le=10000)
 
     @field_validator("allowed_origins", "allowed_hosts", mode="before")
     @classmethod
@@ -42,6 +52,12 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL must use an async SQLAlchemy driver")
         if not self.allowed_origins or not self.allowed_hosts:
             raise ValueError("origin and host allowlists cannot be empty")
+        if not self.redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("REDIS_URL must use redis:// or rediss://")
+        if self.task_soft_time_limit_seconds >= self.task_hard_time_limit_seconds:
+            raise ValueError("task soft time limit must be lower than hard time limit")
+        if self.domain_lock_ttl_seconds <= self.task_hard_time_limit_seconds:
+            raise ValueError("domain lock TTL must exceed the hard task time limit")
         return self
 
 

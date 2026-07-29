@@ -43,6 +43,13 @@ async def system_resolver(host: str, port: int) -> list[str]:
 async def validate_public_target(
     value: str, resolver: Resolver = system_resolver
 ) -> NormalizedTarget:
+    target, _ = await resolve_public_target(value, resolver)
+    return target
+
+
+async def resolve_public_target(
+    value: str, resolver: Resolver = system_resolver
+) -> tuple[NormalizedTarget, list[str]]:
     target = normalize_url(value)
     port = 443 if target.url.startswith("https://") else 80
     try:
@@ -56,4 +63,4 @@ async def validate_public_target(
         addresses = await resolver(target.host, parsed_port or port)
     if not addresses or any(not is_public_address(address) for address in addresses):
         raise UnsafeTargetError("destination is not publicly routable")
-    return target
+    return target, addresses

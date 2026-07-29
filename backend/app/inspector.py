@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
 from app.config import Settings
 from app.extraction import ExtractedPage, extract_page
-from app.ssrf import Resolver, UnsafeTargetError, system_resolver, validate_public_target
+from app.ssrf import Resolver, UnsafeTargetError, resolve_public_target, system_resolver
 
 
 class InspectionError(RuntimeError):
@@ -46,11 +46,26 @@ class WebsiteInspector:
         ) as client:
             for redirect_count in range(self.settings.inspector_max_redirects + 1):
                 try:
-                    target = await validate_public_target(current, self.resolver)
+                    target, addresses = await resolve_public_target(current, self.resolver)
                 except (UnsafeTargetError, ValueError) as exc:
                     raise InspectionError("unsafe_destination") from exc
+                parsed = urlsplit(target.url)
+                address = addresses[0]
+                bracketed = f"[{address}]" if ":" in address else address
+                connect_netloc = f"{bracketed}:{parsed.port}" if parsed.port else bracketed
+                connect_url = urlunsplit(
+                    (parsed.scheme, connect_netloc, parsed.path, parsed.query, parsed.fragment)
+                )
+                if self.transport is not None:
+                    connect_url = target.url
+                request_headers = {"Host": parsed.netloc}
                 try:
-                    async with client.stream("GET", target.url) as response:
+                    async with client.stream(
+                        "GET",
+                        connect_url,
+                        headers=request_headers,
+                        extensions={"sni_hostname": target.host},
+                    ) as response:
                         if response.is_redirect:
                             location = response.headers.get("location")
                             if (
@@ -60,7 +75,13 @@ class WebsiteInspector:
                                 raise InspectionError("redirect_limit")
                             current = urljoin(target.url, location)
                             continue
-                        response.raise_for_status()
+                        if response.status_code >= 400:
+                            if (
+                                response.status_code in {408, 425, 429}
+                                or response.status_code >= 500
+                            ):
+                                raise InspectionError("fetch_failed")
+                            raise InspectionError("fetch_rejected")
                         content_type = (
                             response.headers.get("content-type", "").split(";", 1)[0].lower()
                         )
@@ -82,7 +103,7 @@ class WebsiteInspector:
                         encoding = response.encoding or "utf-8"
                         html = bytes(body).decode(encoding, errors="replace")
                         return InspectionResult(
-                            final_url=str(response.url),
+                            final_url=target.url,
                             page=extract_page(html, self.settings.inspector_max_text_characters),
                         )
                 except InspectionError:

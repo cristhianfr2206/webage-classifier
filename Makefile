@@ -1,4 +1,4 @@
-.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco
+.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco worker-status queue-status
 
 build:
 	docker compose build
@@ -32,3 +32,9 @@ import-tranco:
 	@test -n "$(CSV)" || (echo "Usage: make import-tranco CSV=/absolute/path.csv [LIMIT=10000]" && exit 2)
 	docker compose run --rm -v "$(CSV):/imports/tranco.csv:ro" backend \
 		python -m app.import_tranco /imports/tranco.csv $(if $(LIMIT),--limit $(LIMIT),)
+
+worker-status:
+	docker compose exec backend celery -A app.celery_app:celery_app inspect ping
+
+queue-status:
+	docker compose exec redis redis-cli --scan --pattern 'celery*'

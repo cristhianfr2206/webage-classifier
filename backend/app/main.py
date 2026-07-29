@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine
 from app.logging import configure_logging, request_id
-from app.routers import admin, auth, websites
+from app.routers import admin, auth, operations, websites
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -86,3 +86,4 @@ async def ready() -> JSONResponse:
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(websites.router)
+app.include_router(operations.router)

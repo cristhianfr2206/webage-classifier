@@ -25,6 +25,7 @@ async def public_resolver(_: str, __: int) -> list[str]:
 
 async def test_safe_redirect_is_revalidated_and_html_is_extracted() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.extensions["sni_hostname"] == request.url.host
         if request.url.host == "example.com":
             return httpx.Response(302, headers={"location": "https://www.example.org/final"})
         return httpx.Response(

@@ -1,27 +1,40 @@
 import logging
 import uuid
+from asyncio import Semaphore, gather
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.classifier import classify_page, recommended_age_policy_name
+from app.classification_service import CancelledJob, execute_classification
 from app.config import get_settings
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
-from app.inspector import InspectionError, WebsiteInspector
+from app.inspector import InspectionError
 from app.models import (
     AgePolicy,
     AuditLog,
     Category,
     ClassificationRun,
     ClassificationSource,
+    QueueName,
+    Role,
     RunStatus,
     Website,
     WebsiteClassification,
 )
 from app.normalization import NormalizationError, normalize_url
+from app.queueing import (
+    ACTIVE_STATUSES,
+    dispatch_run,
+    enforce_capacity,
+    enforce_enqueue_rate,
+    remaining_capacity,
+    revoke_run,
+)
 from app.schemas import (
+    BulkEnqueueInput,
+    BulkEnqueueResponse,
     ClassificationExecutionResponse,
     ClassificationResponse,
     ClassificationRunResponse,
@@ -64,16 +77,28 @@ async def _website_for_input(db: Db, raw_url: str) -> Website:
 async def request_check(
     payload: WebsiteCheckInput, _: Csrf, user: CurrentUser, db: Db
 ) -> WebsiteCheckResponse:
+    settings = get_settings()
+    await enforce_enqueue_rate(settings, user.id)
+    await enforce_capacity(db, settings)
     website = await _website_for_input(db, payload.url)
+    should_dispatch = False
     active = await db.scalar(
         select(ClassificationRun).where(
             ClassificationRun.website_id == website.id,
-            ClassificationRun.status.in_([RunStatus.PENDING, RunStatus.RUNNING]),
+            ClassificationRun.status.in_(ACTIVE_STATUSES),
         )
     )
     if active is None:
-        active = ClassificationRun(website_id=website.id, requested_by_id=user.id)
+        active = ClassificationRun(
+            website_id=website.id,
+            requested_by_id=user.id,
+            queue_name=QueueName.REALTIME,
+            priority=9,
+            task_id=str(uuid.uuid4()),
+            max_attempts=settings.task_max_retries + 1,
+        )
         db.add(active)
+        should_dispatch = True
         try:
             await db.commit()
         except IntegrityError:
@@ -81,15 +106,36 @@ async def request_check(
             active = await db.scalar(
                 select(ClassificationRun).where(
                     ClassificationRun.website_id == website.id,
-                    ClassificationRun.status.in_([RunStatus.PENDING, RunStatus.RUNNING]),
+                    ClassificationRun.status.in_(ACTIVE_STATUSES),
                 )
             )
             if active is None:
                 raise
+            should_dispatch = False
     else:
+        if active.status in {RunStatus.PENDING, RunStatus.RETRYING} and (
+            active.queue_name != QueueName.REALTIME or active.priority < 9
+        ):
+            await revoke_run(active)
+            active.queue_name = QueueName.REALTIME
+            active.priority = 9
+            active.task_id = str(uuid.uuid4())
+            should_dispatch = True
         await db.commit()
     await db.refresh(website)
     await db.refresh(active)
+    try:
+        if should_dispatch:
+            await dispatch_run(active)
+    except Exception as exc:
+        logger.exception("classification_enqueue_failed", extra={"run_id": str(active.id)})
+        active.status = RunStatus.FAILED
+        active.error_code = "enqueue_failed"
+        active.completed_at = datetime.now(UTC)
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Queue service unavailable"
+        ) from exc
     return WebsiteCheckResponse(
         website=WebsiteResponse.model_validate(website),
         run=ClassificationRunResponse.model_validate(active),
@@ -139,57 +185,8 @@ async def classify_now(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Classification run not found")
     if run.status != RunStatus.PENDING:
         raise HTTPException(status.HTTP_409_CONFLICT, "Classification run is not pending")
-    run.status = RunStatus.RUNNING
-    run.started_at = datetime.now(UTC)
-    await db.commit()
     try:
-        inspected = await WebsiteInspector(get_settings()).inspect(website.canonical_url)
-        scores = classify_page(inspected.page)
-        categories = {
-            category.slug: category
-            for category in (
-                await db.scalars(
-                    select(Category).where(Category.slug.in_([s.slug for s in scores]))
-                )
-            ).all()
-        }
-        policies = {
-            policy.name: policy
-            for policy in (
-                await db.scalars(select(AgePolicy).where(AgePolicy.is_active.is_(True)))
-            ).all()
-        }
-        classifications: list[WebsiteClassification] = []
-        for score in scores:
-            category = categories.get(score.slug)
-            if category is None:
-                continue
-            policy_name = recommended_age_policy_name(inspected.page, score.slug)
-            policy = (
-                await db.get(AgePolicy, category.age_policy_id)
-                if category.age_policy_id is not None
-                else policies.get(policy_name)
-            )
-            classification = WebsiteClassification(
-                website_id=website.id,
-                run_id=run.id,
-                category_id=category.id,
-                age_policy_id=policy.id if policy else None,
-                source=ClassificationSource.RULES,
-                confidence=score.confidence,
-                evidence=score.evidence,
-                title=inspected.page.title,
-                description=inspected.page.description,
-                final_url=inspected.final_url,
-                text_excerpt=inspected.page.visible_text[:2000],
-            )
-            db.add(classification)
-            classifications.append(classification)
-        if not classifications:
-            raise InspectionError("classification_unavailable")
-        run.status = RunStatus.COMPLETED
-        run.completed_at = datetime.now(UTC)
-        await db.commit()
+        classifications = await execute_classification(db, get_settings(), run.id)
         for item in classifications:
             await db.refresh(item)
         await db.refresh(run)
@@ -199,7 +196,7 @@ async def classify_now(
                 ClassificationResponse.model_validate(item) for item in classifications
             ],
         )
-    except InspectionError as exc:
+    except (InspectionError, CancelledJob) as exc:
         logger.warning("website_inspection_failed", extra={"run_id": str(run.id), "code": str(exc)})
         await db.rollback()
         run.status = RunStatus.FAILED
@@ -272,3 +269,170 @@ async def manual_override(
     await db.commit()
     await db.refresh(classification)
     return classification
+
+
+@router.get("/runs/{run_id}/status", response_model=ClassificationRunResponse)
+async def run_status(run_id: uuid.UUID, user: CurrentUser, db: Db) -> ClassificationRun:
+    run = await db.get(ClassificationRun, run_id)
+    if run is None or (user.role != Role.ADMIN and run.requested_by_id != user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Classification run not found")
+    return run
+
+
+@router.post("/runs/{run_id}/cancel", response_model=ClassificationRunResponse)
+async def cancel_run(run_id: uuid.UUID, _: Csrf, user: CurrentUser, db: Db) -> ClassificationRun:
+    run = await db.scalar(
+        select(ClassificationRun).where(ClassificationRun.id == run_id).with_for_update()
+    )
+    if run is None or (user.role != Role.ADMIN and run.requested_by_id != user.id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Classification run not found")
+    if run.status not in ACTIVE_STATUSES:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Classification run is not active")
+    run.cancel_requested = True
+    if run.status != RunStatus.RUNNING:
+        run.status = RunStatus.CANCELLED
+        run.completed_at = datetime.now(UTC)
+    db.add(
+        AuditLog(
+            actor_id=user.id,
+            action="classification.cancel",
+            target_type="classification_run",
+            target_id=str(run.id),
+            details={"status": run.status.value},
+        )
+    )
+    await db.commit()
+    await revoke_run(run)
+    await db.refresh(run)
+    return run
+
+
+@router.post("/runs/{run_id}/retry", response_model=ClassificationRunResponse)
+async def retry_run(run_id: uuid.UUID, _: Csrf, admin: AdminUser, db: Db) -> ClassificationRun:
+    settings = get_settings()
+    await enforce_capacity(db, settings)
+    run = await db.scalar(
+        select(ClassificationRun).where(ClassificationRun.id == run_id).with_for_update()
+    )
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Classification run not found")
+    if run.status not in {RunStatus.FAILED, RunStatus.CANCELLED}:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Only failed or cancelled runs can be retried"
+        )
+    run.status = RunStatus.PENDING
+    run.queue_name = QueueName.REALTIME
+    run.priority = 9
+    run.task_id = str(uuid.uuid4())
+    run.cancel_requested = False
+    run.attempts = 0
+    run.error_code = None
+    run.started_at = None
+    run.heartbeat_at = None
+    run.completed_at = None
+    run.next_retry_at = None
+    db.add(
+        AuditLog(
+            actor_id=admin.id,
+            action="classification.retry",
+            target_type="classification_run",
+            target_id=str(run.id),
+            details={"queue": run.queue_name.value, "priority": run.priority},
+        )
+    )
+    await db.commit()
+    try:
+        await dispatch_run(run)
+    except Exception as exc:
+        run.status = RunStatus.FAILED
+        run.error_code = "enqueue_failed"
+        run.completed_at = datetime.now(UTC)
+        await db.commit()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Queue service unavailable"
+        ) from exc
+    await db.refresh(run)
+    return run
+
+
+@router.post("/bulk-enqueue", response_model=BulkEnqueueResponse)
+async def bulk_enqueue(
+    payload: BulkEnqueueInput, _: Csrf, admin: AdminUser, db: Db
+) -> BulkEnqueueResponse:
+    payload.validate_range()
+    settings = get_settings()
+    available = await remaining_capacity(db, settings)
+    if available == 0:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Classification queue is full")
+    limit = min(payload.limit, settings.bulk_enqueue_limit, available)
+    websites = list(
+        (
+            await db.scalars(
+                select(Website)
+                .where(Website.tranco_rank.between(payload.rank_start, payload.rank_end))
+                .order_by(Website.tranco_rank)
+                .limit(limit)
+            )
+        ).all()
+    )
+    website_ids = [website.id for website in websites]
+    active_ids = set(
+        (
+            await db.scalars(
+                select(ClassificationRun.website_id).where(
+                    ClassificationRun.website_id.in_(website_ids),
+                    ClassificationRun.status.in_(ACTIVE_STATUSES),
+                )
+            )
+        ).all()
+    )
+    runs = [
+        ClassificationRun(
+            website_id=website.id,
+            requested_by_id=admin.id,
+            queue_name=QueueName.STANDARD,
+            priority=5,
+            task_id=str(uuid.uuid4()),
+            max_attempts=settings.task_max_retries + 1,
+        )
+        for website in websites
+        if website.id not in active_ids
+    ]
+    db.add_all(runs)
+    db.add(
+        AuditLog(
+            actor_id=admin.id,
+            action="classification.bulk_enqueue",
+            target_type="tranco_rank_range",
+            target_id=f"{payload.rank_start}-{payload.rank_end}",
+            details={
+                "requested_limit": payload.limit,
+                "effective_limit": limit,
+                "created": len(runs),
+                "already_active": len(active_ids),
+            },
+        )
+    )
+    await db.commit()
+    semaphore = Semaphore(10)
+
+    async def bounded_dispatch(run: ClassificationRun) -> None:
+        async with semaphore:
+            await dispatch_run(run)
+
+    results = await gather(*(bounded_dispatch(run) for run in runs), return_exceptions=True)
+    failed = [
+        run for run, result in zip(runs, results, strict=True) if isinstance(result, Exception)
+    ]
+    if failed:
+        now = datetime.now(UTC)
+        for run in failed:
+            run.status = RunStatus.FAILED
+            run.error_code = "enqueue_failed"
+            run.completed_at = now
+        await db.commit()
+    return BulkEnqueueResponse(
+        created=len(runs) - len(failed),
+        already_active=len(active_ids),
+        enqueue_failed=len(failed),
+    )

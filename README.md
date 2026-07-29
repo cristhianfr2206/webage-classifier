@@ -1,6 +1,6 @@
-# WebAge Classifier — Milestones 1–2
+# WebAge Classifier — Milestones 1–3
 
-A local-only system for administering website age-classification categories and policies. Milestone 1 provides the secure application foundation. Milestone 2 adds normalized websites, streaming Tranco imports, safe HTTP inspection, weighted rule classification, age-policy application, and classification history. Browser automation, queues, screenshots, and AI classification remain intentionally out of scope.
+A local-only system for administering website age-classification categories and policies. Milestone 3 adds persistent PostgreSQL-backed jobs and Redis/Celery execution across realtime, standard, and maintenance queues. Browser automation, screenshots, and AI classification remain intentionally out of scope.
 
 ## Prerequisites
 
@@ -75,7 +75,7 @@ Makefile
 
 ## Milestone 2 website checks
 
-`POST /api/websites/check` normalizes a hostile URL, creates or reuses its website record, and returns a deduplicated `pending` classification run. This is the production-facing queue boundary: it does not make outbound network requests.
+`POST /api/websites/check` normalizes a hostile URL, creates or reuses its website record, and quickly enqueues a deduplicated realtime classification run. Crawling occurs only in a worker.
 
 For local testing only, an administrator can call:
 
@@ -87,7 +87,38 @@ That explicit path performs one asynchronous inspection directly. It validates D
 
 History is available at `GET /api/websites/{website_id}/history`. Administrators can create an audited manual result at `POST /api/websites/{website_id}/manual-override`; manual results coexist with rule history instead of destructively replacing it.
 
-DNS is validated immediately before each request and redirect. The client deliberately sends no authorization headers, cookies, or internal credentials. As with a normal hostname-based TLS client, a narrow DNS-change window remains between validation and the transport's own resolution; deployments needing stronger pinning should add a resolver-aware transport in a later worker milestone.
+DNS is validated immediately before each request and redirect. Every answer must be public, and the worker connects to one validated address while preserving the original Host header and TLS SNI identity. The client sends no authorization headers, cookies, or internal credentials.
+
+## Milestone 3 queues
+
+PostgreSQL is the authoritative job store. Redis contains only bounded JSON Celery messages, rate counters, and expiring domain locks; it has no host port and stores no credentials or crawl content. Task payloads contain only a run UUID.
+
+- `realtime`: priority 9 for active authenticated-user requests.
+- `standard`: priority 5 for bounded Tranco rank batches.
+- `maintenance`: reserved for fixed-name operational work.
+
+A partial unique PostgreSQL index prevents multiple pending, retrying, or running jobs for one website. A token-owned Redis lock prevents concurrent work for a registrable domain. Task execution locks the database run, reuses an existing result, checks cancellation before persistence, and never changes a completed result to failed.
+
+Transient network, lock, timeout, and worker errors use bounded exponential backoff with jitter. Unsafe destinations and rejected content fail permanently. Defaults provide four attempts, a 45-second soft limit, and a 60-second hard limit. Workers acknowledge late, reject work on process loss, prefetch one task, and receive a 75-second shutdown grace period.
+
+```text
+GET  /api/websites/runs/{run_id}/status
+POST /api/websites/runs/{run_id}/cancel
+POST /api/websites/runs/{run_id}/retry       (admin)
+POST /api/websites/bulk-enqueue              (admin)
+GET  /api/operations/queues                  (admin)
+GET  /api/operations/workers                 (admin)
+```
+
+Bulk enqueue loads a bounded Tranco rank range and all existing active runs without N+1 queries. Interactive enqueue uses a per-user Redis rate window; both paths enforce a global PostgreSQL active-job ceiling, database uniqueness, and configured batch limits.
+
+```bash
+docker compose logs -f worker-realtime worker-standard worker-maintenance
+make worker-status
+make queue-status
+```
+
+Cancellation is cooperative for an in-flight request: the PostgreSQL flag prevents result persistence, while queued tasks are revoked without abruptly terminating a worker.
 
 ## Streaming Tranco import
 
@@ -103,7 +134,7 @@ docker compose run --rm \
 
 Omit `--limit` for the full file. The database enforces unique domains and a partial unique index prevents duplicate pending/running classification work. Import progress is recorded in `tranco_imports`.
 
-## Milestone 2 limits
+## Inspection and queue limits
 
 Defaults are configurable in `.env`:
 
@@ -112,6 +143,9 @@ Defaults are configurable in `.env`:
 - 1,000,000 response bytes
 - 50,000 extracted characters
 - 5 redirects
+- 10,000 active jobs
+- 1,000 jobs per bulk request
+- 20 interactive enqueue requests per user per minute
 
 Keep these bounded. The inspector does not bypass authentication, CAPTCHAs, paywalls, or access controls and does not retain full source HTML.
 
@@ -119,5 +153,5 @@ Keep these bounded. The inspector does not bypass authentication, CAPTCHAs, payw
 
 - If `docker` is unavailable in Ubuntu, enable Docker Desktop → Settings → Resources → WSL Integration for that distribution, then restart WSL with `wsl --shutdown` from PowerShell.
 - If ports are occupied, stop the conflicting process; do not expose PostgreSQL as a workaround.
-- Inspect service logs with `docker compose logs backend frontend db`.
+- Inspect service logs with `docker compose logs backend frontend db redis worker-realtime worker-standard worker-maintenance`.
 - Validate environment interpolation with `docker compose config` (it renders secrets, so do not paste its output into issues).

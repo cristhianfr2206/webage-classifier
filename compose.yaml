@@ -17,6 +17,22 @@ services:
     networks: [internal]
     security_opt: [no-new-privileges:true]
 
+  redis:
+    image: redis:7.4.7-alpine
+    user: redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
   backend:
     build:
       context: ./backend
@@ -26,6 +42,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
     networks: [internal, public]
@@ -33,6 +51,45 @@ services:
     cap_drop: [ALL]
     read_only: true
     tmpfs: [/tmp]
+
+  worker-realtime:
+    build:
+      context: ./backend
+      target: runtime
+    restart: unless-stopped
+    env_file: .env
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-Q", "realtime", "-n", "realtime@%h", "--loglevel=INFO", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    stop_grace_period: 75s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [internal, public]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping -d realtime@$$HOSTNAME --timeout=2 | grep -q pong"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  worker-standard:
+    extends:
+      service: worker-realtime
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-Q", "standard", "-n", "standard@%h", "--loglevel=INFO", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping -d standard@$$HOSTNAME --timeout=2 | grep -q pong"]
+
+  worker-maintenance:
+    extends:
+      service: worker-realtime
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "-Q", "maintenance", "-n", "maintenance@%h", "--loglevel=INFO", "--concurrency=1"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app:celery_app inspect ping -d maintenance@$$HOSTNAME --timeout=2 | grep -q pong"]
 
   frontend:
     build:
@@ -85,3 +142,4 @@ networks:
 
 volumes:
   postgres_data:
+  redis_data:

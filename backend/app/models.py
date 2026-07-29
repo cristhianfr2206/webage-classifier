@@ -19,9 +19,17 @@ class Role(str, enum.Enum):
 
 class RunStatus(str, enum.Enum):
     PENDING = "pending"
+    RETRYING = "retrying"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class QueueName(str, enum.Enum):
+    REALTIME = "realtime"
+    STANDARD = "standard"
+    MAINTENANCE = "maintenance"
 
 
 class ClassificationSource(str, enum.Enum):
@@ -118,10 +126,23 @@ class ClassificationRun(Base):
     status: Mapped[RunStatus] = mapped_column(
         Enum(RunStatus, name="run_status"), default=RunStatus.PENDING, index=True
     )
+    queue_name: Mapped[QueueName] = mapped_column(
+        Enum(QueueName, name="queue_name"), default=QueueName.STANDARD
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=5)
+    task_id: Mapped[str | None] = mapped_column(String(50), unique=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=4)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
     website: Mapped[Website] = relationship()
 
 

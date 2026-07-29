@@ -72,6 +72,11 @@ class ClassificationRunResponse(BaseModel):
     id: uuid.UUID
     website_id: uuid.UUID
     status: str
+    queue_name: str
+    priority: int
+    attempts: int
+    max_attempts: int
+    cancel_requested: bool
     error_code: str | None
 
 
@@ -105,3 +110,30 @@ class ManualOverrideInput(BaseModel):
     category_id: uuid.UUID
     age_policy_id: uuid.UUID | None = None
     reason: str = Field(min_length=3, max_length=500)
+
+
+class BulkEnqueueInput(BaseModel):
+    rank_start: int = Field(ge=1, le=1_000_000)
+    rank_end: int = Field(ge=1, le=1_000_000)
+    limit: int = Field(default=100, ge=1, le=10_000)
+
+    def validate_range(self) -> None:
+        if self.rank_start > self.rank_end:
+            raise ValueError("rank_start must not exceed rank_end")
+
+
+class BulkEnqueueResponse(BaseModel):
+    created: int
+    already_active: int
+    enqueue_failed: int
+
+
+class QueueStatusResponse(BaseModel):
+    redis_ok: bool
+    active_jobs: int
+    queues: dict[str, int]
+
+
+class WorkerHealthResponse(BaseModel):
+    healthy: bool
+    workers: list[str]
