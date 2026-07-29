@@ -1,4 +1,4 @@
-.PHONY: build up down logs migrate seed format lint typecheck test check compose-config
+.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco
 
 build:
 	docker compose build
@@ -27,3 +27,8 @@ test:
 check: lint typecheck test
 compose-config:
 	docker compose config --quiet
+
+import-tranco:
+	@test -n "$(CSV)" || (echo "Usage: make import-tranco CSV=/absolute/path.csv [LIMIT=10000]" && exit 2)
+	docker compose run --rm -v "$(CSV):/imports/tranco.csv:ro" backend \
+		python -m app.import_tranco /imports/tranco.csv $(if $(LIMIT),--limit $(LIMIT),)

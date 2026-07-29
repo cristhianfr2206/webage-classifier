@@ -17,6 +17,18 @@ class Role(str, enum.Enum):
     VIEWER = "viewer"
 
 
+class RunStatus(str, enum.Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ClassificationSource(str, enum.Enum):
+    RULES = "rules"
+    MANUAL = "manual"
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -43,6 +55,7 @@ class Category(Base):
     name: Mapped[str] = mapped_column(String(80), unique=True)
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     description: Mapped[str] = mapped_column(String(500), default="")
+    age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -69,3 +82,73 @@ class AuditLog(Base):
         default=dict,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Website(Base):
+    __tablename__ = "websites"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    domain: Mapped[str] = mapped_column(String(253), unique=True, index=True)
+    registrable_domain: Mapped[str] = mapped_column(String(253), index=True)
+    canonical_url: Mapped[str] = mapped_column(String(2048))
+    tranco_rank: Mapped[int | None] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TrancoImport(Base):
+    __tablename__ = "tranco_imports"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_name: Mapped[str] = mapped_column(String(255))
+    requested_limit: Mapped[int | None] = mapped_column(Integer)
+    imported_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ClassificationRun(Base):
+    __tablename__ = "classification_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    website_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("websites.id", ondelete="CASCADE"), index=True
+    )
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[RunStatus] = mapped_column(
+        Enum(RunStatus, name="run_status"), default=RunStatus.PENDING, index=True
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    website: Mapped[Website] = relationship()
+
+
+class WebsiteClassification(Base):
+    __tablename__ = "website_classifications"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    website_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("websites.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="SET NULL"), index=True
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("categories.id"))
+    age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
+    source: Mapped[ClassificationSource] = mapped_column(
+        Enum(ClassificationSource, name="classification_source")
+    )
+    confidence: Mapped[int] = mapped_column(Integer)
+    evidence: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    title: Mapped[str] = mapped_column(String(500), default="")
+    description: Mapped[str] = mapped_column(String(1000), default="")
+    final_url: Mapped[str] = mapped_column(String(2048), default="")
+    text_excerpt: Mapped[str] = mapped_column(String(2000), default="")
+    overridden_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )

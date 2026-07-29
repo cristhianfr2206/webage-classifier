@@ -1,6 +1,6 @@
-# WebAge Classifier — Milestone 1
+# WebAge Classifier — Milestones 1–2
 
-A local-only foundation for administering website age-classification categories and policies. Milestone 1 provides a FastAPI API, PostgreSQL persistence, secure cookie authentication, backend role checks, audit logging, and a Next.js admin dashboard. Crawling, queues, screenshots, and AI classification are intentionally out of scope.
+A local-only system for administering website age-classification categories and policies. Milestone 1 provides the secure application foundation. Milestone 2 adds normalized websites, streaming Tranco imports, safe HTTP inspection, weighted rule classification, age-policy application, and classification history. Browser automation, queues, screenshots, and AI classification remain intentionally out of scope.
 
 ## Prerequisites
 
@@ -72,6 +72,48 @@ frontend/  Next.js App Router, TypeScript, tests
 compose.yaml
 Makefile
 ```
+
+## Milestone 2 website checks
+
+`POST /api/websites/check` normalizes a hostile URL, creates or reuses its website record, and returns a deduplicated `pending` classification run. This is the production-facing queue boundary: it does not make outbound network requests.
+
+For local testing only, an administrator can call:
+
+```text
+POST /api/websites/{website_id}/runs/{run_id}/classify-now
+```
+
+That explicit path performs one asynchronous inspection directly. It validates DNS and every redirect destination, accepts only globally routable IPv4/IPv6 answers, disables environment proxies and cookies, follows redirects manually, applies strict time and byte limits, accepts only HTML, never executes JavaScript, and discards raw HTML after bounded extraction. Public errors remain generic while logs record only a stable failure code and run ID.
+
+History is available at `GET /api/websites/{website_id}/history`. Administrators can create an audited manual result at `POST /api/websites/{website_id}/manual-override`; manual results coexist with rule history instead of destructively replacing it.
+
+DNS is validated immediately before each request and redirect. The client deliberately sends no authorization headers, cookies, or internal credentials. As with a normal hostname-based TLS client, a narrow DNS-change window remains between validation and the transport's own resolution; deployments needing stronger pinning should add a resolver-aware transport in a later worker milestone.
+
+## Streaming Tranco import
+
+Place a Tranco CSV in a deliberate local path and mount it into the one-shot backend container. The importer reads the CSV iterator incrementally, validates and IDNA-normalizes each domain, retains only one bounded batch, and uses PostgreSQL `INSERT ... ON CONFLICT DO UPDATE`.
+
+For a quick top-N test:
+
+```bash
+docker compose run --rm \
+  -v "$PWD/data:/imports:ro" \
+  backend python -m app.import_tranco /imports/top-1m.csv --limit 10000
+```
+
+Omit `--limit` for the full file. The database enforces unique domains and a partial unique index prevents duplicate pending/running classification work. Import progress is recorded in `tranco_imports`.
+
+## Milestone 2 limits
+
+Defaults are configurable in `.env`:
+
+- 5-second connection timeout
+- 10-second response/read timeout
+- 1,000,000 response bytes
+- 50,000 extracted characters
+- 5 redirects
+
+Keep these bounded. The inspector does not bypass authentication, CAPTCHAs, paywalls, or access controls and does not retain full source HTML.
 
 ## Troubleshooting WSL2
 

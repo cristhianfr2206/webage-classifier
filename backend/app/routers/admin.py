@@ -21,6 +21,8 @@ async def categories(_: CurrentUser, db: Db) -> list[Category]:
 
 @router.post("/categories", response_model=CategoryResponse, status_code=status.HTTP_201_CREATED)
 async def create_category(payload: CategoryInput, _: Csrf, admin: AdminUser, db: Db) -> Category:
+    if payload.age_policy_id is not None and await db.get(AgePolicy, payload.age_policy_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Age policy not found")
     category = Category(**payload.model_dump())
     try:
         db.add(category)
@@ -31,7 +33,13 @@ async def create_category(payload: CategoryInput, _: Csrf, admin: AdminUser, db:
                 action="category.create",
                 target_type="category",
                 target_id=str(category.id),
-                details={"name": category.name, "slug": category.slug},
+                details={
+                    "name": category.name,
+                    "slug": category.slug,
+                    "age_policy_id": str(category.age_policy_id)
+                    if category.age_policy_id
+                    else None,
+                },
             )
         )
         await db.commit()

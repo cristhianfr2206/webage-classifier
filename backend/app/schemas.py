@@ -19,6 +19,7 @@ class CategoryInput(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     slug: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=80)
     description: str = Field(default="", max_length=500)
+    age_policy_id: uuid.UUID | None = None
 
     @field_validator("name", "description")
     @classmethod
@@ -51,3 +52,56 @@ class AgePolicyInput(BaseModel):
 class AgePolicyResponse(AgePolicyInput):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+
+
+class WebsiteCheckInput(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class WebsiteResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    domain: str
+    registrable_domain: str
+    canonical_url: str
+    tranco_rank: int | None
+
+
+class ClassificationRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    website_id: uuid.UUID
+    status: str
+    error_code: str | None
+
+
+class WebsiteCheckResponse(BaseModel):
+    website: WebsiteResponse
+    run: ClassificationRunResponse
+
+
+class ClassificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    website_id: uuid.UUID
+    run_id: uuid.UUID | None
+    category_id: uuid.UUID
+    age_policy_id: uuid.UUID | None
+    source: str
+    confidence: int
+    evidence: list[dict[str, object]]
+    title: str
+    description: str
+    final_url: str
+    text_excerpt: str
+
+
+class ClassificationExecutionResponse(BaseModel):
+    run: ClassificationRunResponse
+    classifications: list[ClassificationResponse]
+
+
+class ManualOverrideInput(BaseModel):
+    category_id: uuid.UUID
+    age_policy_id: uuid.UUID | None = None
+    reason: str = Field(min_length=3, max_length=500)

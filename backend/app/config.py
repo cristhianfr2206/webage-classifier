@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     log_level: str = "INFO"
     session_ttl_minutes: int = Field(default=480, ge=5, le=10080)
+    inspector_connect_timeout_seconds: float = Field(default=5.0, ge=0.5, le=30)
+    inspector_response_timeout_seconds: float = Field(default=10.0, ge=1, le=60)
+    inspector_max_response_bytes: int = Field(default=1_000_000, ge=1024, le=5_000_000)
+    inspector_max_text_characters: int = Field(default=50_000, ge=1000, le=200_000)
+    inspector_max_redirects: int = Field(default=5, ge=0, le=10)
 
     @field_validator("allowed_origins", "allowed_hosts", mode="before")
     @classmethod

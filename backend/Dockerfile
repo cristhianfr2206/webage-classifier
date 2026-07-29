@@ -10,7 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/home/app/.local/bin:${PA
 RUN addgroup --system app && adduser --system --ingroup app --home /home/app app
 WORKDIR /app
 COPY --from=builder /wheels /wheels
-RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+RUN pip install --no-cache-dir /wheels/* \
+    && pip uninstall --yes pip setuptools wheel \
+    && rm -rf /wheels
 COPY --chown=app:app . .
 USER app
 EXPOSE 8000

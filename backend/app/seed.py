@@ -38,6 +38,17 @@ async def seed() -> None:
                     AgePolicy(name="Adult", minimum_age=18, maximum_age=120),
                 ]
             )
+        await db.flush()
+        policies = {policy.name: policy for policy in (await db.scalars(select(AgePolicy))).all()}
+        category_policy = {
+            "education": "Children",
+            "entertainment": "Teen",
+            "social": "Teen",
+        }
+        for category in (await db.scalars(select(Category))).all():
+            policy = policies.get(category_policy.get(category.slug, ""))
+            if category.age_policy_id is None and policy is not None:
+                category.age_policy_id = policy.id
         await db.commit()
     await engine.dispose()
 
