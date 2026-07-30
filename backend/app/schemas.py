@@ -39,6 +39,10 @@ class AgePolicyInput(BaseModel):
     maximum_age: int = Field(ge=0, le=120)
     description: str = Field(default="", max_length=500)
     is_active: bool = True
+    rating: str = Field(default="unrated", max_length=40)
+    blocked: bool = False
+    review_required: bool = False
+    priority: int = Field(default=0, ge=0, le=1000)
 
     @field_validator("name", "description")
     @classmethod
@@ -170,3 +174,62 @@ class BrowserInspectionResponse(BaseModel):
 class BrowserRequestResponse(BaseModel):
     run: ClassificationRunResponse
     browser: BrowserInspectionResponse
+
+
+class AIRequest(BaseModel):
+    trigger: str = Field(default="admin", pattern=r"^(admin|manual_review)$")
+
+
+class AIClassificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    run_id: uuid.UUID
+    website_id: uuid.UUID
+    status: str
+    trigger: str
+    provider: str
+    model: str
+    model_version: str
+    confidence: int | None
+    prompt_injection_suspected: bool
+    validation_status: str
+    failure_code: str | None
+    evidence: list[str]
+    duration_ms: int | None
+    usage_metadata: dict[str, object]
+    manual_review_required: bool
+    promoted: bool
+
+
+class AIRequestResponse(BaseModel):
+    run: ClassificationRunResponse
+    ai: AIClassificationResponse
+
+
+class AISettingsResponse(BaseModel):
+    enabled: bool
+    provider: str
+    model: str
+    confidence_threshold: float
+    conflict_threshold: float
+    screenshot_enabled: bool
+    retry_limit: int
+    daily_request_limit: int
+    monthly_cost_limit: float
+
+
+class AISettingsUpdate(BaseModel):
+    enabled: bool
+    provider: str = Field(pattern=r"^[a-z0-9_-]{1,80}$")
+    model: str = Field(max_length=120)
+    confidence_threshold: float = Field(ge=0, le=1)
+    conflict_threshold: float = Field(ge=0, le=1)
+    screenshot_enabled: bool = False
+    retry_limit: int = Field(ge=0, le=5)
+    daily_request_limit: int = Field(ge=0, le=1_000_000)
+    monthly_cost_limit: float = Field(ge=0)
+
+
+class AIUsageResponse(BaseModel):
+    requests: int
+    estimated_cost_microunits: int

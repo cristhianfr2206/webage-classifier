@@ -41,3 +41,17 @@ export type BrowserInspection = {
   failure_code: string | null;
   artifact_id: string | null;
 };
+
+export type AIClassification = {
+  id: string;
+  run_id: string;
+  status: string;
+  provider: string;
+  model: string;
+  confidence: number | null;
+  evidence: string[];
+  prompt_injection_suspected: boolean;
+  validation_status: string;
+  manual_review_required: boolean;
+  promoted: boolean;
+};

@@ -1,4 +1,4 @@
-.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco worker-status queue-status browser-worker-status browser-security-test
+.PHONY: build up down logs migrate seed format lint typecheck test check compose-config import-tranco worker-status queue-status browser-worker-status browser-security-test ai-worker-status ai-security-test
 
 build:
 	docker compose build
@@ -44,3 +44,9 @@ browser-worker-status:
 
 browser-security-test:
 	docker compose run --rm browser-security-test
+
+ai-worker-status:
+	docker compose exec backend celery -A app.ai_celery_app:ai_celery_app inspect ping
+
+ai-security-test:
+	docker compose run --rm backend-check pytest tests/test_ai_security.py tests/test_ai_jobs.py tests/test_ai_state_integration.py

@@ -143,6 +143,30 @@ Browser contexts are fresh and nonpersistent. Downloads, popups, service workers
 
 See [the browser worker guide](docs/browser-worker-operations.md), [security threat model](docs/security-threat-model.md), [screenshot retention guide](docs/screenshot-retention.md), and [WSL2 guidance](docs/wsl2-browser-resources.md).
 
+## Milestone 5 AI fallback
+
+AI classification is disabled by default and runs only after static rules and applicable browser
+inspection remain ambiguous, or after an authorized explicit request. Dedicated `ai_realtime`,
+`ai`, and `ai_maintenance` workers keep provider latency away from HTTP and browser work.
+
+The provider receives bounded cleaned evidence, never raw HTML, credentials, cookies, environment
+variables, or database records. Provider JSON is strictly validated against active database
+categories. AI cannot set age, rating, blocked state, review requirements, or policy priority;
+those values always come from PostgreSQL. Invalid or low-confidence output preserves the current
+classification and requires manual review. Screenshots remain disabled unless both browser and AI
+image policies explicitly permit them. No chain-of-thought is stored or exposed.
+
+For local keyless testing set `AI_ENABLED=true`, `AI_PROVIDER=fake`, and `AI_MODEL=fake`, then run
+`make ai-security-test`. AI can be wrong and does not establish legal suitability; high-risk and
+low-confidence cases require administrator review.
+
+See [AI provider configuration](docs/ai-provider-configuration.md),
+[AI threat model](docs/ai-security-threat-model.md),
+[prompt-injection defenses](docs/prompt-injection-defense.md),
+[AI worker operations](docs/ai-worker-operations.md),
+[usage controls](docs/ai-usage-cost-controls.md), and
+[manual review](docs/manual-review-workflow.md).
+
 ## Streaming Tranco import
 
 Place a Tranco CSV in a deliberate local path and mount it into the one-shot backend container. The importer reads the CSV iterator incrementally, validates and IDNA-normalizes each domain, retains only one bounded batch, and uses PostgreSQL `INSERT ... ON CONFLICT DO UPDATE`.

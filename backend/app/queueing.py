@@ -36,6 +36,32 @@ def browser_redis_client(settings: Settings) -> Redis:
     return cast(Redis, Redis.from_url(settings.browser_redis_url, decode_responses=True))
 
 
+def ai_redis_client(settings: Settings) -> Redis:
+    return cast(Redis, Redis.from_url(settings.ai_redis_url, decode_responses=True))
+
+
+async def enforce_ai_enqueue_rate(settings: Settings, user_id: uuid.UUID, domain: str) -> None:
+    client = ai_redis_client(settings)
+    keys = (
+        (f"rate:ai:user:{user_id}", settings.ai_requests_per_minute),
+        (f"rate:ai:domain:{domain}", settings.ai_requests_per_domain),
+        ("rate:ai:global", settings.ai_requests_per_minute),
+    )
+    try:
+        for key, limit in keys:
+            count = await client.incr(key)
+            if count == 1:
+                await client.expire(key, 60)
+            if count > limit:
+                raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "AI rate limit exceeded")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "AI queue unavailable") from exc
+    finally:
+        await client.aclose()
+
+
 async def enforce_enqueue_rate(settings: Settings, user_id: uuid.UUID) -> None:
     client = redis_client(settings)
     key = f"rate:enqueue:{user_id}"

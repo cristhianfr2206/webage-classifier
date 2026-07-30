@@ -1,7 +1,7 @@
 "use client";
 
 import React, { FormEvent, useEffect, useState } from "react";
-import { api, BrowserInspection } from "../lib/api";
+import { api, AIClassification, BrowserInspection } from "../lib/api";
 
 type User = { id: string; email: string; role: "admin" | "viewer" };
 type Category = { id: string; name: string; slug: string; description: string };
@@ -13,6 +13,17 @@ type Policy = {
   description: string;
   is_active: boolean;
 };
+type AISettings = {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  confidence_threshold: number;
+  conflict_threshold: number;
+  screenshot_enabled: boolean;
+  retry_limit: number;
+  daily_request_limit: number;
+  monthly_cost_limit: number;
+};
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
@@ -21,6 +32,8 @@ export default function Home() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [browserRun, setBrowserRun] = useState<BrowserInspection | null>(null);
+  const [aiRun, setAiRun] = useState<AIClassification | null>(null);
+  const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
 
   async function loadData(current: User) {
     setUser(current);
@@ -30,6 +43,9 @@ export default function Home() {
     ]);
     setCategories(nextCategories);
     setPolicies(nextPolicies);
+    if (current.role === "admin") {
+      setAiSettings(await api<AISettings>("/api/ai/settings"));
+    }
   }
 
   useEffect(() => {
@@ -81,6 +97,36 @@ export default function Home() {
       setError(
         reason instanceof Error ? reason.message : "Browser inspection failed",
       );
+    }
+  }
+
+  async function requestAI(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const data = new FormData(event.currentTarget);
+    try {
+      const response = await api<{ ai: AIClassification }>(
+        `/api/ai/websites/${encodeURIComponent(String(data.get("website_id")))}/classify`,
+        { method: "POST", body: JSON.stringify({ trigger: "admin" }) },
+      );
+      setAiRun(response.ai);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "AI request failed");
+    }
+  }
+
+  async function saveAISettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!aiSettings) return;
+    try {
+      setAiSettings(
+        await api<AISettings>("/api/ai/settings", {
+          method: "PUT",
+          body: JSON.stringify(aiSettings),
+        }),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "AI settings failed");
     }
   }
 
@@ -173,6 +219,83 @@ export default function Home() {
           </ul>
         </article>
       </section>
+      {user.role === "admin" && (
+        <section className="card">
+          <h2>AI classification fallback</h2>
+          <p>
+            AI is used only for ambiguous results. Database age policies remain
+            authoritative and low-confidence results require review.
+          </p>
+          {aiSettings && (
+            <form onSubmit={saveAISettings}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={aiSettings.enabled}
+                  onChange={(event) =>
+                    setAiSettings({
+                      ...aiSettings,
+                      enabled: event.target.checked,
+                    })
+                  }
+                />
+                AI enabled
+              </label>
+              <label>
+                Provider
+                <input
+                  value={aiSettings.provider}
+                  onChange={(event) =>
+                    setAiSettings({
+                      ...aiSettings,
+                      provider: event.target.value,
+                    })
+                  }
+                />
+              </label>
+              <label>
+                Model
+                <input
+                  value={aiSettings.model}
+                  onChange={(event) =>
+                    setAiSettings({ ...aiSettings, model: event.target.value })
+                  }
+                />
+              </label>
+              <button type="submit">Save AI settings</button>
+            </form>
+          )}
+          <form onSubmit={requestAI}>
+            <label>
+              Website ID
+              <input name="website_id" required pattern="[0-9a-fA-F-]{36}" />
+            </label>
+            <button type="submit">Request AI recommendation</button>
+          </form>
+          {aiRun && (
+            <div aria-live="polite">
+              <strong>Status: {aiRun.status}</strong>
+              <p>
+                {aiRun.provider} / {aiRun.model} · confidence{" "}
+                {aiRun.confidence ?? "unavailable"}
+              </p>
+              {aiRun.prompt_injection_suspected && (
+                <p role="alert">Potential prompt injection detected</p>
+              )}
+              <ul>
+                {aiRun.evidence.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+              <p>
+                {aiRun.promoted
+                  ? "Promoted after validation and policy application"
+                  : "Not promoted"}
+              </p>
+            </div>
+          )}
+        </section>
+      )}
       {user.role === "admin" && (
         <section className="card">
           <h2>Browser reinspection</h2>

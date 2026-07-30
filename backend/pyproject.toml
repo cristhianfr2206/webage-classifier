@@ -66,6 +66,9 @@ module = [
   "app.browser_celery_app",
   "app.browser_tasks",
   "app.browser_queueing",
+  "app.ai_celery_app",
+  "app.ai_tasks",
+  "app.ai_queueing",
 ]
 disallow_untyped_decorators = false
 

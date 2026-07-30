@@ -190,6 +190,83 @@ services:
     healthcheck:
       disable: true
 
+  worker-ai-realtime:
+    build:
+      context: ./backend
+      target: runtime
+    restart: unless-stopped
+    command: ["celery", "-A", "app.ai_celery_app:ai_celery_app", "worker", "-Q", "ai_realtime", "-n", "ai_realtime@%h", "--loglevel=INFO", "--concurrency=${AI_WORKER_CONCURRENCY:-1}"]
+    environment: &ai_environment
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      AI_REDIS_URL: ${AI_REDIS_URL:-redis://redis:6379/2}
+      SECRET_KEY: ai-worker-has-no-session-secret-000000000
+      INITIAL_ADMIN_EMAIL: ai-worker@example.com
+      INITIAL_ADMIN_PASSWORD: ai-worker-unused-password
+      ALLOWED_ORIGINS: '["http://invalid"]'
+      ALLOWED_HOSTS: '["invalid"]'
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-disabled}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_MODEL_VERSION: ${AI_MODEL_VERSION:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_ENDPOINT: ${AI_ENDPOINT:-}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-20}
+      AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
+      AI_MAX_INPUT_CHARACTERS: ${AI_MAX_INPUT_CHARACTERS:-20000}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-1000}
+      AI_CONFIDENCE_THRESHOLD: ${AI_CONFIDENCE_THRESHOLD:-0.75}
+      AI_CONFLICT_THRESHOLD: ${AI_CONFLICT_THRESHOLD:-0.10}
+      AI_SCREENSHOT_ENABLED: ${AI_SCREENSHOT_ENABLED:-false}
+      AI_DAILY_REQUEST_LIMIT: ${AI_DAILY_REQUEST_LIMIT:-100}
+      AI_MONTHLY_COST_LIMIT: ${AI_MONTHLY_COST_LIMIT:-0}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [internal, public]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    pids_limit: 64
+    mem_limit: 384m
+    cpus: 0.5
+    stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.ai_celery_app:ai_celery_app inspect ping -d ai_realtime@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  worker-ai:
+    extends: {service: worker-ai-realtime}
+    command: ["celery", "-A", "app.ai_celery_app:ai_celery_app", "worker", "-Q", "ai", "-n", "ai@%h", "--loglevel=INFO", "--concurrency=${AI_WORKER_CONCURRENCY:-1}"]
+    environment:
+      <<: *ai_environment
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.ai_celery_app:ai_celery_app inspect ping -d ai@$$HOSTNAME --timeout=5 | grep -q pong"]
+
+  worker-ai-maintenance:
+    extends: {service: worker-ai-realtime}
+    command: ["celery", "-A", "app.ai_celery_app:ai_celery_app", "worker", "-Q", "ai_maintenance", "-n", "ai_maintenance@%h", "--loglevel=INFO", "--concurrency=1"]
+    environment:
+      <<: *ai_environment
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.ai_celery_app:ai_celery_app inspect ping -d ai_maintenance@$$HOSTNAME --timeout=5 | grep -q pong"]
+
+  ai-scheduler:
+    extends: {service: worker-ai-realtime}
+    command: ["celery", "-A", "app.ai_celery_app:ai_celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/ai-celerybeat-schedule"]
+    environment:
+      <<: *ai_environment
+      DATABASE_URL: sqlite+aiosqlite:////tmp/ai-unused.db
+    pids_limit: 32
+    mem_limit: 192m
+    cpus: 0.25
+    healthcheck:
+      disable: true
+
   frontend:
     build:
       context: ./frontend

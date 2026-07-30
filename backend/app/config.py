@@ -55,6 +55,26 @@ class Settings(BaseSettings):
     browser_min_static_text_characters: int = Field(default=300, ge=0, le=10000)
     browser_enqueue_rate_limit: int = Field(default=5, ge=1, le=100)
     browser_chromium_max_tasks: int = Field(default=25, ge=1, le=1000)
+    ai_enabled: bool = False
+    ai_redis_url: str = "redis://redis:6379/2"
+    ai_provider: str = "disabled"
+    ai_model: str = ""
+    ai_model_version: str = ""
+    ai_api_key: str = ""
+    ai_endpoint: str = ""
+    ai_timeout_seconds: int = Field(default=20, ge=1, le=120)
+    ai_max_retries: int = Field(default=2, ge=0, le=5)
+    ai_max_input_characters: int = Field(default=20_000, ge=1000, le=100_000)
+    ai_max_output_tokens: int = Field(default=1000, ge=100, le=8000)
+    ai_confidence_threshold: float = Field(default=0.75, ge=0, le=1)
+    ai_conflict_threshold: float = Field(default=0.10, ge=0, le=1)
+    ai_screenshot_enabled: bool = False
+    ai_worker_concurrency: int = Field(default=1, ge=1, le=8)
+    ai_daily_request_limit: int = Field(default=100, ge=0, le=1_000_000)
+    ai_monthly_cost_limit: float = Field(default=0, ge=0)
+    ai_requests_per_minute: int = Field(default=10, ge=1, le=1000)
+    ai_requests_per_domain: int = Field(default=5, ge=1, le=1000)
+    ai_temperature: float = Field(default=0, ge=0, le=1)
 
     @field_validator("allowed_origins", "allowed_hosts", mode="before")
     @classmethod
@@ -88,6 +108,17 @@ class Settings(BaseSettings):
             raise ValueError("browser soft time limit must be lower than browser hard time limit")
         if self.domain_lock_ttl_seconds <= self.browser_task_hard_time_limit_seconds:
             raise ValueError("domain lock TTL must exceed the browser hard task time limit")
+        if self.ai_enabled:
+            if self.ai_provider == "disabled":
+                raise ValueError("AI_PROVIDER cannot be disabled when AI_ENABLED is true")
+            if not self.ai_model:
+                raise ValueError("AI_MODEL is required when AI is enabled")
+            if self.ai_provider != "fake" and (not self.ai_api_key or not self.ai_endpoint):
+                raise ValueError("AI_API_KEY and AI_ENDPOINT are required for network AI providers")
+            if self.ai_endpoint and not self.ai_endpoint.startswith("https://"):
+                raise ValueError("AI_ENDPOINT must use HTTPS")
+        if not self.ai_redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("AI_REDIS_URL must use redis:// or rediss://")
         return self
 
 

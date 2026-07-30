@@ -17,7 +17,14 @@ from app.browser_service import BrowserJobCancelled, execute_browser_classificat
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.job_control import DomainLock, retry_delay
-from app.models import BrowserInspection, BrowserStatus, ClassificationRun, RunStatus, Website
+from app.models import (
+    BrowserInspection,
+    BrowserStatus,
+    ClassificationRun,
+    QueueName,
+    RunStatus,
+    Website,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -98,6 +105,7 @@ def inspect_browser(self: Task, inspection_id_value: str) -> None:
         _retry(self, inspection_id, "domain_locked")
     try:
         _run(_execute(inspection_id))
+        _run(_enqueue_ai(inspection_id))
     except BrowserJobCancelled:
         return
     except BrowserInspectionError as exc:
@@ -122,6 +130,19 @@ def inspect_browser(self: Task, inspection_id_value: str) -> None:
 async def _execute(inspection_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
         await execute_browser_classification(db, settings, inspection_id)
+
+
+async def _enqueue_ai(inspection_id: uuid.UUID) -> None:
+    from app.ai_queueing import dispatch_ai
+    from app.ai_service import create_automatic_ai_fallback
+
+    async with SessionLocal() as db:
+        inspection = await db.get(BrowserInspection, inspection_id)
+        if not inspection:
+            return
+        job = await create_automatic_ai_fallback(db, settings, inspection.run_id)
+        if job:
+            await dispatch_ai(job, QueueName.AI)
 
 
 @browser_celery_app.task(name="app.browser_tasks.cleanup_browser_artifacts")
@@ -199,3 +220,11 @@ async def _recover_stale() -> int:
                 run.completed_at = datetime.now(UTC)
         await db.commit()
         return len(stale)
+
+
+for registered_name in tuple(browser_celery_app.tasks):
+    if (
+        registered_name.startswith("app.ai_tasks.")
+        or registered_name == "app.tasks.classify_website"
+    ):
+        browser_celery_app.tasks.unregister(registered_name)

@@ -1,10 +1,14 @@
 from celery import Celery
+from celery.app.registry import TaskRegistry
 from kombu import Exchange, Queue
 
 from app.config import get_settings
 
 settings = get_settings()
-browser_celery_app = Celery("webage-browser", broker=settings.browser_redis_url)
+browser_celery_app = Celery(
+    "webage-browser", broker=settings.browser_redis_url, set_as_current=False
+)
+browser_celery_app._tasks = TaskRegistry()
 browser_celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],

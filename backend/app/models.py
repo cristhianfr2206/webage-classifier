@@ -32,6 +32,8 @@ class QueueName(str, enum.Enum):
     MAINTENANCE = "maintenance"
     BROWSER_REALTIME = "browser_realtime"
     BROWSER = "browser"
+    AI_REALTIME = "ai_realtime"
+    AI = "ai"
 
 
 class ClassificationSource(str, enum.Enum):
@@ -39,6 +41,17 @@ class ClassificationSource(str, enum.Enum):
     RENDERED = "rendered"
     SCREENSHOT = "screenshot"
     MANUAL = "manual"
+    AI = "ai"
+
+
+class AIStatus(str, enum.Enum):
+    PENDING = "pending"
+    RETRYING = "retrying"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    REVIEW_REQUIRED = "review_required"
 
 
 class BrowserStatus(str, enum.Enum):
@@ -88,6 +101,10 @@ class AgePolicy(Base):
     maximum_age: Mapped[int] = mapped_column(Integer)
     description: Mapped[str] = mapped_column(String(500), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    rating: Mapped[str] = mapped_column(String(40), default="unrated")
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -223,3 +240,80 @@ class BrowserInspection(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     run: Mapped[ClassificationRun] = relationship()
+
+
+class AIClassification(Base):
+    __tablename__ = "ai_classifications"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    website_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("websites.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[AIStatus] = mapped_column(
+        Enum(AIStatus, name="ai_status"), default=AIStatus.PENDING, index=True
+    )
+    trigger: Mapped[str] = mapped_column(String(40))
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    model: Mapped[str] = mapped_column(String(120))
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    task_id: Mapped[str | None] = mapped_column(String(50), unique=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    request_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    request_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    input_hash: Mapped[str | None] = mapped_column(String(64))
+    input_character_count: Mapped[int] = mapped_column(Integer, default=0)
+    input_token_count: Mapped[int | None] = mapped_column(Integer)
+    output_token_count: Mapped[int | None] = mapped_column(Integer)
+    provider_request_id: Mapped[str | None] = mapped_column(String(120))
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    prompt_injection_suspected: Mapped[bool] = mapped_column(Boolean, default=False)
+    validation_status: Mapped[str] = mapped_column(String(40), default="pending")
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    failure_message: Mapped[str | None] = mapped_column(String(300))
+    usage_metadata: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    estimated_cost_microunits: Mapped[int | None] = mapped_column(Integer)
+    primary_category: Mapped[str | None] = mapped_column(String(80))
+    secondary_categories: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    evidence: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    intended_audience: Mapped[str] = mapped_column(String(200), default="")
+    uncertainty_reason: Mapped[str] = mapped_column(String(500), default="")
+    manual_review_required: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    promoted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    run: Mapped[ClassificationRun] = relationship()
+
+
+class AIConfiguration(Base):
+    __tablename__ = "ai_configuration"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider: Mapped[str] = mapped_column(String(80), default="disabled")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    confidence_threshold: Mapped[int] = mapped_column(Integer, default=75)
+    conflict_threshold: Mapped[int] = mapped_column(Integer, default=10)
+    screenshot_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    retry_limit: Mapped[int] = mapped_column(Integer, default=2)
+    daily_request_limit: Mapped[int] = mapped_column(Integer, default=100)
+    monthly_cost_limit_microunits: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
