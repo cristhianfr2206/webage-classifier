@@ -16,6 +16,7 @@ from app.models import (
     Website,
     WebsiteClassification,
 )
+from app.versioning import rules_for_classifier_version
 
 
 class CancelledJob(RuntimeError):
@@ -61,7 +62,9 @@ async def execute_classification(
     await db.commit()
 
     inspected = await WebsiteInspector(settings).inspect(website.canonical_url)
-    scores = classify_page(inspected.page)
+    scores = classify_page(
+        inspected.page, await rules_for_classifier_version(db, run.classifier_version_id)
+    )
     if not scores:
         raise InspectionError("classification_unavailable")
 

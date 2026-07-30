@@ -43,6 +43,7 @@ from app.schemas import (
     WebsiteCheckResponse,
     WebsiteResponse,
 )
+from app.versioning import active_classifier_version_id
 
 router = APIRouter(prefix="/api/websites", tags=["websites"])
 logger = logging.getLogger(__name__)
@@ -96,6 +97,7 @@ async def request_check(
             priority=9,
             task_id=str(uuid.uuid4()),
             max_attempts=settings.task_max_retries + 1,
+            classifier_version_id=await active_classifier_version_id(db),
         )
         db.add(active)
         should_dispatch = True
@@ -394,6 +396,7 @@ async def bulk_enqueue(
             priority=5,
             task_id=str(uuid.uuid4()),
             max_attempts=settings.task_max_retries + 1,
+            classifier_version_id=await active_classifier_version_id(db),
         )
         for website in websites
         if website.id not in active_ids

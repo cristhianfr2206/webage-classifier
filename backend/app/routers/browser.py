@@ -26,6 +26,7 @@ from app.schemas import (
     BrowserRequestResponse,
     ClassificationRunResponse,
 )
+from app.versioning import active_classifier_version_id
 
 router = APIRouter(prefix="/api/browser", tags=["browser"])
 ACTIVE_BROWSER = (BrowserStatus.PENDING, BrowserStatus.RETRYING, BrowserStatus.RUNNING)
@@ -99,6 +100,7 @@ async def request_browser_inspection(
         priority=9,
         task_id=task_id,
         max_attempts=settings.browser_max_retries + 1,
+        classifier_version_id=await active_classifier_version_id(db),
     )
     db.add(run)
     await db.flush()

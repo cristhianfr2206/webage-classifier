@@ -24,6 +24,41 @@ type AISettings = {
   daily_request_limit: number;
   monthly_cost_limit: number;
 };
+type Dataset = {
+  id: string;
+  name: string;
+  version: string;
+  checksum: string;
+  published: boolean;
+  example_count: number;
+};
+type EvaluationRun = {
+  id: string;
+  status: string;
+  total_count: number;
+  processed_count: number;
+  metrics: Record<string, unknown>;
+};
+type Pilot = {
+  id: string;
+  size: number;
+  dry_run: boolean;
+  status: string;
+  estimate: Record<string, number>;
+  estimate_hash: string;
+};
+type ClassifierVersion = {
+  id: string;
+  version: string;
+  is_active: boolean;
+  change_notes: string;
+};
+type ReviewCase = {
+  id: string;
+  status: string;
+  reason: string;
+  locked: boolean;
+};
 
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
@@ -34,6 +69,13 @@ export default function Home() {
   const [browserRun, setBrowserRun] = useState<BrowserInspection | null>(null);
   const [aiRun, setAiRun] = useState<AIClassification | null>(null);
   const [aiSettings, setAiSettings] = useState<AISettings | null>(null);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [evaluationRuns, setEvaluationRuns] = useState<EvaluationRun[]>([]);
+  const [pilots, setPilots] = useState<Pilot[]>([]);
+  const [classifierVersions, setClassifierVersions] = useState<
+    ClassifierVersion[]
+  >([]);
+  const [reviewCases, setReviewCases] = useState<ReviewCase[]>([]);
 
   async function loadData(current: User) {
     setUser(current);
@@ -45,6 +87,19 @@ export default function Home() {
     setPolicies(nextPolicies);
     if (current.role === "admin") {
       setAiSettings(await api<AISettings>("/api/ai/settings"));
+      const [nextDatasets, nextRuns, nextPilots, nextVersions, nextReviews] =
+        await Promise.all([
+          api<Dataset[]>("/api/evaluation/datasets"),
+          api<EvaluationRun[]>("/api/evaluation/runs"),
+          api<Pilot[]>("/api/pilots"),
+          api<ClassifierVersion[]>("/api/classifier/versions"),
+          api<ReviewCase[]>("/api/manual-reviews"),
+        ]);
+      setDatasets(nextDatasets);
+      setEvaluationRuns(nextRuns);
+      setPilots(nextPilots);
+      setClassifierVersions(nextVersions);
+      setReviewCases(nextReviews);
     }
   }
 
@@ -127,6 +182,51 @@ export default function Home() {
       );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "AI settings failed");
+    }
+  }
+
+  async function importDataset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      const item = await api<Dataset>("/api/evaluation/datasets/import", {
+        method: "POST",
+        body: JSON.stringify({
+          name: data.get("name"),
+          version: data.get("version"),
+          source_format: data.get("source_format"),
+          content: data.get("content"),
+          change_notes: data.get("change_notes"),
+          publish: true,
+        }),
+      });
+      setDatasets([item, ...datasets]);
+      event.currentTarget.reset();
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Dataset import failed",
+      );
+    }
+  }
+
+  async function createDryRun(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      const item = await api<Pilot>("/api/pilots", {
+        method: "POST",
+        body: JSON.stringify({
+          size: Number(data.get("size")),
+          rank_start: Number(data.get("rank_start")),
+          capacity_limit: Number(data.get("capacity_limit")),
+          dry_run: true,
+        }),
+      });
+      setPilots([item, ...pilots]);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Pilot estimate failed",
+      );
     }
   }
 
@@ -219,6 +319,157 @@ export default function Home() {
           </ul>
         </article>
       </section>
+      {user.role === "admin" && (
+        <section className="card milestone">
+          <h2>Classifier evaluation</h2>
+          <p>
+            Published labeled datasets are immutable. Corrections require a new
+            version linked to the prior dataset.
+          </p>
+          <form onSubmit={importDataset}>
+            <label>
+              Dataset name
+              <input name="name" required maxLength={120} />
+            </label>
+            <label>
+              Version
+              <input
+                name="version"
+                required
+                pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+              />
+            </label>
+            <label>
+              Format
+              <select name="source_format">
+                <option value="csv">CSV</option>
+                <option value="jsonl">JSONL</option>
+              </select>
+            </label>
+            <label>
+              Change notes
+              <input name="change_notes" maxLength={1000} />
+            </label>
+            <label>
+              Labeled data
+              <textarea name="content" rows={6} required maxLength={5000000} />
+            </label>
+            <button type="submit">Publish dataset version</button>
+          </form>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Dataset</th>
+                  <th>Version</th>
+                  <th>Examples</th>
+                  <th>Checksum</th>
+                </tr>
+              </thead>
+              <tbody>
+                {datasets.map((item) => (
+                  <tr key={item.id}>
+                    <td>{item.name}</td>
+                    <td>{item.version}</td>
+                    <td>{item.example_count}</td>
+                    <td>
+                      <code>{item.checksum.slice(0, 12)}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <h3>Evaluation runs</h3>
+          <ul>
+            {evaluationRuns.map((run) => (
+              <li key={run.id}>
+                <span>{run.status}</span>
+                <span>
+                  {run.processed_count}/{run.total_count}
+                </span>
+                <span>
+                  Primary accuracy:{" "}
+                  {String(run.metrics.primary_category_accuracy ?? "pending")}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <h3>Classifier versions</h3>
+          <ul>
+            {classifierVersions.map((version) => (
+              <li key={version.id}>
+                <strong>{version.version}</strong>
+                <span>
+                  {version.is_active ? "active" : "immutable history"}
+                </span>
+                <span>{version.change_notes}</span>
+              </li>
+            ))}
+          </ul>
+          <h3>Manual review queue</h3>
+          <ul>
+            {reviewCases.map((item) => (
+              <li key={item.id}>
+                <strong>{item.status}</strong>
+                <span>{item.reason}</span>
+                <span>{item.locked ? "locked" : "open"}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {user.role === "admin" && (
+        <section className="card milestone">
+          <h2>Controlled pilot dry-run</h2>
+          <p>
+            Estimate capacity, runtime, cost, and storage without dispatching
+            classification work.
+          </p>
+          <form onSubmit={createDryRun}>
+            <label>
+              Pilot size
+              <select name="size" defaultValue="100">
+                <option value="100">100</option>
+                <option value="1000">1,000</option>
+                <option value="10000">10,000</option>
+              </select>
+            </label>
+            <label>
+              Starting Tranco rank
+              <input name="rank_start" type="number" min="1" defaultValue="1" />
+            </label>
+            <label>
+              Queue capacity
+              <input
+                name="capacity_limit"
+                type="number"
+                min="1"
+                max="1000"
+                defaultValue="100"
+              />
+            </label>
+            <button type="submit">Calculate dry-run</button>
+          </form>
+          <ul>
+            {pilots.map((pilot) => (
+              <li key={pilot.id}>
+                <div>
+                  <strong>{pilot.size.toLocaleString()} domains</strong>
+                  <p>
+                    {pilot.status} · {pilot.dry_run ? "dry-run" : "live"}
+                  </p>
+                </div>
+                <span>
+                  {pilot.estimate.estimated_runtime_seconds ?? 0}s ·{" "}
+                  {pilot.estimate.expected_ai_calls ?? 0} AI calls
+                </span>
+              </li>
+            ))}
+          </ul>
+          {error && <p role="alert">{error}</p>}
+        </section>
+      )}
       {user.role === "admin" && (
         <section className="card">
           <h2>AI classification fallback</h2>

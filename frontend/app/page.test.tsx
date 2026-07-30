@@ -27,6 +27,15 @@ describe("browser inspection output", () => {
       if (path === "/api/categories" || path === "/api/age-policies") {
         return Promise.resolve([]);
       }
+      if (
+        path === "/api/evaluation/datasets" ||
+        path === "/api/evaluation/runs" ||
+        path === "/api/pilots" ||
+        path === "/api/classifier/versions" ||
+        path === "/api/manual-reviews"
+      ) {
+        return Promise.resolve([]);
+      }
       if (path === "/api/ai/settings") {
         return Promise.resolve({
           enabled: false,
@@ -88,7 +97,7 @@ describe("browser inspection output", () => {
     await screen.findByText(
       "<img src=x onerror='globalThis.textAttack=true'><svg onload='globalThis.svgAttack=true'>",
     );
-    await waitFor(() => expect(request).toHaveBeenCalledTimes(5));
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(10));
     expect(document.querySelector("script")).toBeNull();
     expect(document.querySelector("img")).toBeNull();
     expect(document.querySelector("svg")).toBeNull();

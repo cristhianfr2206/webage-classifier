@@ -133,6 +133,55 @@ class BulkEnqueueResponse(BaseModel):
     enqueue_failed: int
 
 
+class DatasetImportInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+    source_format: str = Field(pattern=r"^(csv|jsonl)$")
+    content: str = Field(min_length=1, max_length=5_000_000)
+    prior_version_id: uuid.UUID | None = None
+    change_notes: str = Field(default="", max_length=1000)
+    publish: bool = True
+
+
+class HumanLabelInput(BaseModel):
+    category: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=80)
+    expected_age: int = Field(ge=0, le=120)
+    notes: str = Field(default="", max_length=1000)
+
+
+class EvaluationRunInput(BaseModel):
+    dataset_id: uuid.UUID
+    classifier_version_id: uuid.UUID | None = None
+
+
+class RulesetVersionInput(BaseModel):
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+    weights: dict[str, object]
+    thresholds: dict[str, object]
+    change_notes: str = Field(min_length=3, max_length=1000)
+
+
+class ClassifierVersionInput(BaseModel):
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+    ruleset_version_id: uuid.UUID
+    change_notes: str = Field(min_length=3, max_length=1000)
+
+
+class PilotInput(BaseModel):
+    size: int
+    rank_start: int = Field(default=1, ge=1, le=1_000_000)
+    dry_run: bool = False
+    capacity_limit: int = Field(default=100, ge=1, le=1000)
+    classifier_version_id: uuid.UUID | None = None
+
+
+class ReviewDecisionInput(BaseModel):
+    action: str = Field(pattern=r"^(approve|override|reject|adjudicate)$")
+    category_id: uuid.UUID | None = None
+    age_policy_id: uuid.UUID | None = None
+    notes: str = Field(min_length=3, max_length=1000)
+
+
 class QueueStatusResponse(BaseModel):
     redis_ok: bool
     active_jobs: int

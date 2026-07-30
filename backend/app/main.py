@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine
 from app.logging import configure_logging, request_id
-from app.routers import admin, ai, auth, browser, operations, websites
+from app.routers import admin, ai, auth, browser, evaluation, operations, websites
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -89,3 +89,4 @@ app.include_router(websites.router)
 app.include_router(operations.router)
 app.include_router(browser.router)
 app.include_router(ai.router)
+app.include_router(evaluation.router)

@@ -15,7 +15,15 @@ from app.ai_service import AIJobError, execute_ai_classification
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.job_control import DomainLock
-from app.models import AIClassification, AIStatus, ClassificationRun, RunStatus, Website
+from app.models import (
+    AIClassification,
+    AIStatus,
+    ClassificationRun,
+    ManualReviewCase,
+    ReviewStatus,
+    RunStatus,
+    Website,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -62,6 +70,18 @@ async def _fail(ai_id: uuid.UUID, code: str) -> None:
             run.status = RunStatus.FAILED
             run.error_code = "ai_classification_failed"
             run.completed_at = datetime.now(UTC)
+            existing_review = await db.scalar(
+                select(ManualReviewCase).where(ManualReviewCase.classification_run_id == run.id)
+            )
+            if existing_review is None:
+                db.add(
+                    ManualReviewCase(
+                        website_id=job.website_id,
+                        classification_run_id=run.id,
+                        status=ReviewStatus.PENDING,
+                        reason="AI classification failed and requires human review",
+                    )
+                )
         await db.commit()
 
 

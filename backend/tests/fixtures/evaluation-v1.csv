@@ -1,0 +1,4 @@
+domain,primary_category,secondary_categories,expected_age,expected_rating,expected_blocked
+learn.example,education,,8,children,false
+community.example,social,education,13,teen,false
+casino.example,entertainment,,18,adult,true

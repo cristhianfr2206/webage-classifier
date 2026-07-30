@@ -1,5 +1,20 @@
 # Browser security threat model
 
+## Evaluation and pilot controls
+
+Evaluation imports are hostile input. CSV/JSONL size, row count, domains, categories,
+field lengths, and evidence are validated transactionally. Spreadsheet exports
+neutralize formula-leading characters. Published ground truth is protected by
+PostgreSQL triggers and API rules; corrections require an immutable successor
+version with lineage.
+
+Reviewer disagreements are excluded until adjudicated. Tuning accepts bounded
+data-only weights and thresholds, never executable expressions. Activation and
+review decisions require administrator authorization, CSRF validation, and audit
+records. Pilots cannot exceed 10,000 domains; dispatch is capacity bounded and
+dry-runs never dispatch tasks. Existing SSRF, browser isolation, secret handling,
+locking, and prior-classification preservation controls remain authoritative.
+
 Every URL, browser request, redirect, frame, popup, and downloaded resource is untrusted. Only HTTP and HTTPS destinations whose complete DNS answer set is globally routable are permitted. Loopback, private, link-local, reserved, carrier-grade NAT, multicast, unspecified, metadata, and internal destinations are denied.
 
 Controls are layered: centralized DNS/IP validation, best-effort re-resolution immediately before route continuation, Playwright request interception, redirect/final-URL validation, bounded requests and bytes, disposable contexts, capability denial, process limits, and container network separation. This reduces but cannot perfectly eliminate DNS-rebinding windows or browser-engine vulnerabilities.

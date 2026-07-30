@@ -150,23 +150,31 @@ async def queue_snapshot(db: AsyncSession, settings: Settings) -> QueueSnapshot:
         await client.ping()
         await browser_client.ping()
         queue_sizes = {}
-        for queue in QueueName:
+        queue_names = [queue.value for queue in QueueName] + [
+            "evaluation",
+            "evaluation_maintenance",
+        ]
+        for queue_name in queue_names:
             selected = (
                 browser_client
-                if queue in {QueueName.BROWSER, QueueName.BROWSER_REALTIME}
+                if queue_name in {QueueName.BROWSER.value, QueueName.BROWSER_REALTIME.value}
                 else client
             )
             size = 0
-            async for key in selected.scan_iter(match=f"{queue.value}*"):
+            async for key in selected.scan_iter(match=f"{queue_name}*"):
                 if await selected.type(key) == "list":
                     value = await selected.execute_command(  # type: ignore[no-untyped-call]
                         "LLEN", key
                     )
                     size += int(value)
-            queue_sizes[queue.value] = size
+            queue_sizes[queue_name] = size
         redis_ok = True
     except Exception:
-        queue_sizes = {queue.value: -1 for queue in QueueName}
+        queue_sizes = {
+            **{queue.value: -1 for queue in QueueName},
+            "evaluation": -1,
+            "evaluation_maintenance": -1,
+        }
         redis_ok = False
     finally:
         await client.aclose()

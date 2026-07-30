@@ -1,0 +1,3 @@
+{"domain":"learn.example","primary_category":"education","secondary_categories":[],"expected_age":8,"expected_rating":"children","expected_blocked":false}
+{"domain":"community.example","primary_category":"social","secondary_categories":["education"],"expected_age":13,"expected_rating":"teen","expected_blocked":false}
+{"domain":"casino.example","primary_category":"entertainment","secondary_categories":[],"expected_age":18,"expected_rating":"adult","expected_blocked":true}

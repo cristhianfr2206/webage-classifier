@@ -1,6 +1,21 @@
-# WebAge Classifier — Milestones 1–4
+# WebAge Classifier — Milestones 1–6
 
-A local-only system for administering website age-classification categories and policies. Milestone 4 adds an HTTP-first, isolated browser fallback with dedicated queues, bounded rendered extraction, and optional private screenshots. AI classification remains intentionally out of scope.
+A local-first website age-classification system with static inspection, secure browser
+fallback, optional provider-independent AI fallback, and evaluation and pilot
+operations. AI is disabled by default and database age policies remain authoritative.
+
+## Evaluation and controlled pilots
+
+Milestone 6 adds immutable versioned CSV/JSONL evaluation datasets, reviewer
+agreement and adjudication, batch evaluation, calibration, separate category and
+policy metrics, audited ruleset versioning, manual review, and controlled Tranco
+pilots. Pilot sizes are restricted to 100, 1,000, and 10,000; dry-runs dispatch no
+work and generate reproducible capacity, runtime, cost, and storage estimates.
+
+See [evaluation datasets](docs/evaluation-guide.md),
+[classifier versioning](docs/classifier-versioning.md),
+[manual review](docs/manual-review-operations.md), and
+[pilot operations](docs/pilot-operations.md).
 
 ## Prerequisites
 

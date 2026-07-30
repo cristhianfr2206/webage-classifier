@@ -19,6 +19,7 @@ from app.models import (
     Website,
     WebsiteClassification,
 )
+from app.versioning import active_classifier_version_id, rules_for_classifier_version
 
 
 class BrowserJobCancelled(RuntimeError):
@@ -74,6 +75,7 @@ async def create_automatic_browser_fallback(
         priority=5,
         task_id=task_id,
         max_attempts=settings.browser_max_retries + 1,
+        classifier_version_id=await active_classifier_version_id(db),
     )
     db.add(run)
     await db.flush()
@@ -139,7 +141,9 @@ async def execute_browser_classification(
         and inspection.trigger
         in {"admin_screenshot", "low_confidence", "manual_review", "high_risk"},
     ).inspect(website.canonical_url)
-    scores = classify_page(result.page)
+    scores = classify_page(
+        result.page, await rules_for_classifier_version(db, run.classifier_version_id)
+    )
     if not scores or any(not score.evidence for score in scores):
         raise RuntimeError("invalid_browser_evidence")
 
@@ -197,7 +201,9 @@ async def _validated_classifications(
     run: ClassificationRun,
     result: BrowserResult,
 ) -> list[WebsiteClassification]:
-    scores = classify_page(result.page)
+    scores = classify_page(
+        result.page, await rules_for_classifier_version(db, run.classifier_version_id)
+    )
     categories = {
         item.slug: item
         for item in (

@@ -28,6 +28,7 @@ from app.schemas import (
     AIUsageResponse,
     ClassificationRunResponse,
 )
+from app.versioning import active_classifier_version_id
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 ACTIVE = (AIStatus.PENDING, AIStatus.RETRYING, AIStatus.RUNNING)
@@ -90,6 +91,7 @@ async def request_ai(
         priority=9,
         task_id=task_id,
         max_attempts=settings.ai_max_retries + 1,
+        classifier_version_id=await active_classifier_version_id(db),
     )
     db.add(run)
     await db.flush()

@@ -17,7 +17,9 @@ body {
   min-height: 100vh;
 }
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 .center {
@@ -54,12 +56,17 @@ label {
   gap: 8px;
   color: var(--muted);
 }
-input {
+input,
+select,
+textarea {
   background: #0d1118;
   color: var(--ink);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
+}
+textarea {
+  resize: vertical;
 }
 button {
   border: 0;
@@ -140,6 +147,27 @@ li p {
 }
 code {
   color: var(--muted);
+}
+.milestone {
+  margin-top: 16px;
+}
+.milestone form {
+  display: grid;
+  gap: 14px;
+  margin: 20px 0;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  text-align: left;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
 }
 @media (max-width: 720px) {
   header,

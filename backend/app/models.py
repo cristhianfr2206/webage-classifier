@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -61,6 +71,36 @@ class BrowserStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class EvaluationStatus(str, enum.Enum):
+    DRAFT = "draft"
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ReviewStatus(str, enum.Enum):
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    DISAGREEMENT = "disagreement"
+    RESOLVED = "resolved"
+    REJECTED = "rejected"
+    LOCKED = "locked"
+
+
+class PilotStatus(str, enum.Enum):
+    DRAFT = "draft"
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    CANCEL_REQUESTED = "cancel_requested"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class User(Base):
@@ -153,6 +193,10 @@ class ClassificationRun(Base):
         ForeignKey("websites.id", ondelete="CASCADE"), index=True
     )
     requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    classifier_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classifier_versions.id"),
+        server_default="00000000-0000-4000-8000-000000000603",
+    )
     status: Mapped[RunStatus] = mapped_column(
         Enum(RunStatus, name="run_status"), default=RunStatus.PENDING, index=True
     )
@@ -317,3 +361,235 @@ class AIConfiguration(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class RulesetVersion(Base):
+    __tablename__ = "ruleset_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version: Mapped[str] = mapped_column(String(80), unique=True)
+    weights: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    thresholds: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    checksum: Mapped[str] = mapped_column(String(64), unique=True)
+    change_notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PolicyVersion(Base):
+    __tablename__ = "policy_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version: Mapped[str] = mapped_column(String(80), unique=True)
+    snapshot: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    checksum: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClassifierVersion(Base):
+    __tablename__ = "classifier_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version: Mapped[str] = mapped_column(String(80), unique=True)
+    ruleset_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ruleset_versions.id"))
+    policy_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("policy_versions.id"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    change_notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    activated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EvaluationDataset(Base):
+    __tablename__ = "evaluation_datasets"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_evaluation_dataset_version"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(20), default="1")
+    prior_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("evaluation_datasets.id", ondelete="RESTRICT")
+    )
+    checksum: Mapped[str] = mapped_column(String(64), unique=True)
+    source_format: Mapped[str] = mapped_column(String(10))
+    change_notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    published: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationExample(Base):
+    __tablename__ = "evaluation_examples"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "domain", name="uq_evaluation_example_domain"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("evaluation_datasets.id", ondelete="CASCADE"), index=True
+    )
+    domain: Mapped[str] = mapped_column(String(253))
+    primary_category: Mapped[str | None] = mapped_column(String(80))
+    secondary_categories: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    expected_age: Mapped[int | None] = mapped_column(Integer)
+    expected_rating: Mapped[str | None] = mapped_column(String(40))
+    expected_blocked: Mapped[bool | None] = mapped_column(Boolean)
+    evidence: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    adjudicated: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class HumanLabel(Base):
+    __tablename__ = "human_labels"
+    __table_args__ = (
+        UniqueConstraint("example_id", "reviewer_id", name="uq_human_label_reviewer"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    example_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("evaluation_examples.id", ondelete="CASCADE"), index=True
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    category: Mapped[str] = mapped_column(String(80))
+    expected_age: Mapped[int] = mapped_column(Integer)
+    notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationRun(Base):
+    __tablename__ = "evaluation_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dataset_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("evaluation_datasets.id"), index=True)
+    classifier_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classifier_versions.id"), index=True
+    )
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[EvaluationStatus] = mapped_column(
+        Enum(EvaluationStatus, name="evaluation_status"),
+        default=EvaluationStatus.PENDING,
+        index=True,
+    )
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    metrics: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    task_id: Mapped[str | None] = mapped_column(String(50), unique=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EvaluationResult(Base):
+    __tablename__ = "evaluation_results"
+    __table_args__ = (UniqueConstraint("run_id", "example_id", name="uq_evaluation_result"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("evaluation_runs.id", ondelete="CASCADE"), index=True
+    )
+    example_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("evaluation_examples.id"))
+    predicted_primary: Mapped[str | None] = mapped_column(String(80))
+    predicted_secondary: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    predicted_age: Mapped[int | None] = mapped_column(Integer)
+    predicted_rating: Mapped[str | None] = mapped_column(String(40))
+    predicted_blocked: Mapped[bool | None] = mapped_column(Boolean)
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(20), default="unknown")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_microunits: Mapped[int] = mapped_column(Integer, default=0)
+    manual_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ManualReviewCase(Base):
+    __tablename__ = "manual_review_cases"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    website_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("websites.id"), index=True)
+    example_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("evaluation_examples.id"))
+    classification_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_runs.id")
+    )
+    status: Mapped[ReviewStatus] = mapped_column(
+        Enum(ReviewStatus, name="review_status"), default=ReviewStatus.PENDING, index=True
+    )
+    reason: Mapped[str] = mapped_column(String(500))
+    assigned_to_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    final_category_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("categories.id"))
+    final_age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
+    locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ManualReviewDecision(Base):
+    __tablename__ = "manual_review_decisions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_cases.id", ondelete="CASCADE"), index=True
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    action: Mapped[str] = mapped_column(String(30))
+    category_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("categories.id"))
+    age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
+    notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PilotRun(Base):
+    __tablename__ = "pilot_runs"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    classifier_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("classifier_versions.id"))
+    size: Mapped[int] = mapped_column(Integer)
+    rank_start: Mapped[int] = mapped_column(Integer, default=1)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[PilotStatus] = mapped_column(
+        Enum(PilotStatus, name="pilot_status"), default=PilotStatus.DRAFT, index=True
+    )
+    capacity_limit: Mapped[int] = mapped_column(Integer, default=100)
+    queued_count: Mapped[int] = mapped_column(Integer, default=0)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    estimate: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    estimate_hash: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PilotItem(Base):
+    __tablename__ = "pilot_items"
+    __table_args__ = (UniqueConstraint("pilot_id", "website_id", name="uq_pilot_item"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pilot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("pilot_runs.id", ondelete="CASCADE"), index=True
+    )
+    website_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("websites.id"))
+    classification_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_runs.id")
+    )
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

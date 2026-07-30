@@ -42,12 +42,14 @@ ADULT_TERMS = {"adult", "porn", "casino", "betting", "gambling"}
 TEEN_TERMS = {"chat", "social", "forum", "dating"}
 
 
-def classify_page(page: ExtractedPage) -> list[CategoryScore]:
+def classify_page(
+    page: ExtractedPage, ruleset: dict[str, dict[str, int]] | None = None
+) -> list[CategoryScore]:
     title = page.title.casefold()
     description = page.description.casefold()
     text = page.visible_text.casefold()
     results: list[CategoryScore] = []
-    for slug, rules in RULES.items():
+    for slug, rules in (ruleset or RULES).items():
         raw_score = 0
         evidence: list[dict[str, object]] = []
         for term, weight in rules.items():

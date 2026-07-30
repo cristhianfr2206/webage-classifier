@@ -16,11 +16,14 @@ from app.models import (
     Category,
     ClassificationRun,
     ClassificationSource,
+    ManualReviewCase,
     QueueName,
+    ReviewStatus,
     RunStatus,
     Website,
     WebsiteClassification,
 )
+from app.versioning import active_classifier_version_id
 
 
 class AIJobError(RuntimeError):
@@ -76,6 +79,7 @@ async def create_automatic_ai_fallback(
         priority=5,
         task_id=task_id,
         max_attempts=settings.ai_max_retries + 1,
+        classifier_version_id=await active_classifier_version_id(db),
     )
     db.add(run)
     await db.flush()
@@ -212,6 +216,18 @@ async def execute_ai_classification(
         job.confidence = round(output.confidence * 100)
         run.status = RunStatus.FAILED
         run.error_code = "manual_review_required"
+        existing_review = await db.scalar(
+            select(ManualReviewCase).where(ManualReviewCase.classification_run_id == run.id)
+        )
+        if existing_review is None:
+            db.add(
+                ManualReviewCase(
+                    website_id=website.id,
+                    classification_run_id=run.id,
+                    status=ReviewStatus.PENDING,
+                    reason="AI confidence remained below the configured threshold",
+                )
+            )
         await db.commit()
         raise AIJobError("low_confidence")
     policies = []
