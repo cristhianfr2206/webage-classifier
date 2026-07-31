@@ -29,6 +29,32 @@ def chromium_processes() -> set[int]:
     return processes
 
 
+def zombie_processes() -> set[int]:
+    processes: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            state = (entry / "stat").read_text().split(") ", 1)[1].split()[0]
+        except (FileNotFoundError, IndexError, PermissionError, ProcessLookupError):
+            continue
+        if state == "Z":
+            processes.add(int(entry.name))
+    return processes
+
+
+def system_thread_count() -> int:
+    total = 0
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            total += sum(1 for _ in (entry / "task").iterdir())
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    return total
+
+
 async def wait_for_processes(expected: set[int], timeout: float = 5) -> None:
     async with asyncio.timeout(timeout):
         while chromium_processes() != expected:
@@ -178,6 +204,32 @@ async def test_browser_crash_is_normalized_and_next_browser_remains_healthy(
         await crashing.inspect(browser_fixture.url("/js"))
     result = await inspector(browser_fixture).inspect(browser_fixture.url("/js"))
     assert result.page.title == "Rendered title"
+
+
+async def test_fifty_sequential_inspections_release_processes_and_threads(
+    browser_fixture: FixtureServer,
+) -> None:
+    baseline_chromium = chromium_processes()
+    baseline_zombies = zombie_processes()
+    baseline_threads = system_thread_count()
+    browser = inspector(browser_fixture)
+
+    for _ in range(50):
+        result = await browser.inspect(browser_fixture.url("/js"))
+        assert result.page.title == "Rendered title"
+
+    await wait_for_processes(baseline_chromium, timeout=10)
+    final_zombies = zombie_processes()
+    final_threads = system_thread_count()
+    final_chromium = chromium_processes()
+    print(
+        "browser_stress_counts "
+        f"zombies={len(baseline_zombies)}->{len(final_zombies)} "
+        f"threads={baseline_threads}->{final_threads} "
+        f"chromium={len(baseline_chromium)}->{len(final_chromium)}"
+    )
+    assert final_zombies == baseline_zombies
+    assert final_threads <= baseline_threads
 
 
 async def test_navigation_loop_stops_at_redirect_limit(browser_fixture: FixtureServer) -> None:

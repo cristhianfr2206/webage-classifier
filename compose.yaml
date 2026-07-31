@@ -98,6 +98,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile.browser
     restart: unless-stopped
+    # Playwright spawns Chromium process trees.  Keep a real init as PID 1 so
+    # orphaned grandchildren are reaped when a Celery pool child is recycled
+    # or killed by a hard task limit.
+    init: true
     command: ["celery", "-A", "app.browser_celery_app:browser_celery_app", "worker", "-Q", "browser_realtime", "-n", "browser_realtime@%h", "--loglevel=INFO", "--concurrency=${BROWSER_WORKER_CONCURRENCY:-1}"]
     environment: &browser_environment
       HOME: /tmp
@@ -359,6 +363,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile.browser
     profiles: [tools]
+    init: true
     network_mode: none
     user: browser
     read_only: true

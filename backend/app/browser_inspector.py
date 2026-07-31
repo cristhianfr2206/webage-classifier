@@ -152,6 +152,12 @@ class BrowserInspector:
             blocked_requests += 1
             await dialog.dismiss()
 
+        def navigation(_: Any) -> None:
+            nonlocal redirects, termination_code
+            redirects += 1
+            if redirects - 1 > self.settings.browser_max_redirects:
+                stop_with("redirect_limit")
+
         try:
             playwright = await async_playwright().start()
             if True:
@@ -190,12 +196,6 @@ class BrowserInspector:
                 page.on("download", reject_download)
                 page.on("dialog", reject_dialog)
                 page.on("response", account_response)
-
-                def navigation(_: Any) -> None:
-                    nonlocal redirects, termination_code
-                    redirects += 1
-                    if redirects - 1 > self.settings.browser_max_redirects:
-                        stop_with("redirect_limit")
 
                 page.on("framenavigated", navigation)
                 try:
@@ -282,14 +282,28 @@ class BrowserInspector:
                 with suppress(Exception):
                     async with asyncio.timeout(2):
                         await stop_task
-            if termination_code is not None and browser is not None:
+            # Stop producing callbacks before tearing down their Playwright
+            # targets. Closing the browser first causes pending page/context
+            # handlers to cascade TargetClosedError exceptions after a limit
+            # or timeout has already terminated the inspection.
+            if cdp is not None:
                 with suppress(Exception):
-                    async with asyncio.timeout(2):
-                        await browser.close()
+                    cdp.remove_listener("Network.requestWillBeSent", account_request)
+                    cdp.remove_listener("Network.dataReceived", account_data_received)
+            if page is not None:
+                with suppress(Exception):
+                    page.remove_listener("popup", reject_popup)
+                    page.remove_listener("download", reject_download)
+                    page.remove_listener("dialog", reject_dialog)
+                    page.remove_listener("response", account_response)
+                    page.remove_listener("framenavigated", navigation)
+            if context is not None:
+                with suppress(Exception):
+                    context.remove_listener("page", reject_popup)
             if context is not None:
                 with suppress(Exception):
                     async with asyncio.timeout(2):
-                        await context.unroute_all(behavior="wait")
+                        await context.unroute_all(behavior="ignoreErrors")
             if cdp is not None:
                 with suppress(Exception):
                     async with asyncio.timeout(2):
