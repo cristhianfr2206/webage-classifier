@@ -169,6 +169,7 @@ class Website(Base):
     registrable_domain: Mapped[str] = mapped_column(String(253), index=True)
     canonical_url: Mapped[str] = mapped_column(String(2048))
     tranco_rank: Mapped[int | None] = mapped_column(Integer, index=True)
+    pilot_eligible: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -582,12 +583,17 @@ class PilotRun(Base):
 
 class PilotItem(Base):
     __tablename__ = "pilot_items"
-    __table_args__ = (UniqueConstraint("pilot_id", "website_id", name="uq_pilot_item"),)
+    __table_args__ = (
+        UniqueConstraint("pilot_id", "website_id", name="uq_pilot_item"),
+        UniqueConstraint("pilot_id", "selection_order", name="uq_pilot_item_selection_order"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pilot_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("pilot_runs.id", ondelete="CASCADE"), index=True
     )
     website_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("websites.id"))
+    selection_order: Mapped[int] = mapped_column(Integer)
+    original_tranco_rank: Mapped[int] = mapped_column(Integer)
     classification_run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("classification_runs.id")
     )

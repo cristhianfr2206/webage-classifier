@@ -17,7 +17,6 @@ from app.models import (
     PilotStatus,
     QueueName,
     RunStatus,
-    Website,
 )
 from app.queueing import dispatch_run
 
@@ -92,35 +91,30 @@ def advance_pilots() -> int:
                     elif run.status == RunStatus.CANCELLED:
                         item.status = "cancelled"
                     else:
+                        item.status = "retrying" if run.status == RunStatus.RETRYING else "running"
                         active += 1
                 pilot.processed_count = sum(item.status == "completed" for item in items)
                 pilot.failed_count = sum(item.status == "failed" for item in items)
                 slots = min(
                     pilot.capacity_limit - active,
-                    pilot.size - len(items),
+                    sum(
+                        item.classification_run_id is None and item.status == "pending"
+                        for item in items
+                    ),
                 )
                 new_runs: list[ClassificationRun] = []
                 if slots > 0:
-                    existing_ids = select(PilotItem.website_id).where(
-                        PilotItem.pilot_id == pilot.id
-                    )
-                    websites = list(
+                    pending = sorted(
                         (
-                            await db.scalars(
-                                select(Website)
-                                .where(
-                                    Website.tranco_rank >= pilot.rank_start,
-                                    Website.tranco_rank < pilot.rank_start + pilot.size,
-                                    Website.id.not_in(existing_ids),
-                                )
-                                .order_by(Website.tranco_rank)
-                                .limit(slots)
-                            )
-                        ).all()
-                    )
-                    for website in websites:
+                            item
+                            for item in items
+                            if item.classification_run_id is None and item.status == "pending"
+                        ),
+                        key=lambda item: item.selection_order,
+                    )[:slots]
+                    for item in pending:
                         run = ClassificationRun(
-                            website_id=website.id,
+                            website_id=item.website_id,
                             requested_by_id=pilot.requested_by_id,
                             classifier_version_id=pilot.classifier_version_id,
                             queue_name=QueueName.STANDARD,
@@ -129,14 +123,8 @@ def advance_pilots() -> int:
                         )
                         db.add(run)
                         await db.flush()
-                        db.add(
-                            PilotItem(
-                                pilot_id=pilot.id,
-                                website_id=website.id,
-                                classification_run_id=run.id,
-                                status="queued",
-                            )
-                        )
+                        item.classification_run_id = run.id
+                        item.status = "queued"
                         new_runs.append(run)
                     pilot.queued_count += len(new_runs)
                 terminal = (
@@ -144,11 +132,7 @@ def advance_pilots() -> int:
                     + pilot.failed_count
                     + sum(item.status == "cancelled" for item in items)
                 )
-                if (
-                    not new_runs
-                    and active == 0
-                    and (len(items) >= pilot.size or terminal == len(items))
-                ):
+                if not new_runs and active == 0 and terminal == len(items):
                     pilot.status = PilotStatus.COMPLETED
                     pilot.completed_at = datetime.now(UTC)
                 await db.commit()

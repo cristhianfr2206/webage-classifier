@@ -13,3 +13,4 @@ dist/
 *.tsbuildinfo
 *.log
 .DS_Store
+data/*.csv

@@ -36,6 +36,7 @@ async def import_rows(
             index_elements=[Website.domain],
             set_={
                 "tranco_rank": statement.excluded.tranco_rank,
+                "pilot_eligible": statement.excluded.pilot_eligible,
                 "updated_at": datetime.now(UTC),
             },
         )
@@ -60,6 +61,7 @@ async def import_rows(
             "registrable_domain": registrable_domain(domain),
             "canonical_url": f"https://{domain}/",
             "tranco_rank": rank,
+            "pilot_eligible": True,
         }
         accepted += 1
         if len(batch) >= batch_size:

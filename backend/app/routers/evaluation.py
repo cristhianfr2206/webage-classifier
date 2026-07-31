@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
@@ -32,9 +32,11 @@ from app.models import (
     QueueName,
     ReviewStatus,
     RulesetVersion,
+    RunStatus,
     User,
     Website,
 )
+from app.pilot_selection import select_pilot_candidates
 from app.queueing import dispatch_run
 from app.schemas import (
     ClassifierVersionInput,
@@ -660,20 +662,20 @@ async def create_pilot(payload: PilotInput, _: Csrf, admin: AdminUser, db: Db) -
     )
     if version is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "No classifier version available")
-    available = int(
-        await db.scalar(
-            select(func.count())
-            .select_from(Website)
-            .where(
-                Website.tranco_rank >= payload.rank_start,
-                Website.tranco_rank < payload.rank_start + payload.size,
-            )
+    if db.get_bind().dialect.name == "postgresql":
+        await db.execute(text("SELECT pg_advisory_xact_lock(923006)"))
+    candidates = await select_pilot_candidates(db, rank_start=payload.rank_start, size=payload.size)
+    if len(candidates) != payload.size:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            (
+                f"Only {len(candidates)} pilot-eligible websites are available "
+                f"at or after Tranco rank {payload.rank_start}; {payload.size} required"
+            ),
         )
-        or 0
-    )
     estimate, digest = pilot_estimate(
         size=payload.size,
-        pending=available,
+        pending=len(candidates),
         capacity=payload.capacity_limit,
         browser_rate=0.20,
         ai_rate=0.05,
@@ -682,6 +684,18 @@ async def create_pilot(payload: PilotInput, _: Csrf, admin: AdminUser, db: Db) -
         ai_ms=5_000,
         ai_cost_microunits=2_000,
     )
+    membership_payload = [
+        [candidate.original_tranco_rank, str(candidate.website_id)] for candidate in candidates
+    ]
+    membership_hash = hashlib.sha256(
+        json.dumps(membership_payload, separators=(",", ":")).encode()
+    ).hexdigest()
+    estimate["membership_hash"] = membership_hash
+    estimate["first_selected_rank"] = candidates[0].original_tranco_rank
+    estimate["last_selected_rank"] = candidates[-1].original_tranco_rank
+    digest = hashlib.sha256(
+        json.dumps(estimate, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     pilot = PilotRun(
         requested_by_id=admin.id,
         classifier_version_id=version.id,
@@ -696,13 +710,31 @@ async def create_pilot(payload: PilotInput, _: Csrf, admin: AdminUser, db: Db) -
     )
     db.add(pilot)
     await db.flush()
+    db.add_all(
+        [
+            PilotItem(
+                pilot_id=pilot.id,
+                website_id=candidate.website_id,
+                selection_order=index,
+                original_tranco_rank=candidate.original_tranco_rank,
+                status="pending",
+            )
+            for index, candidate in enumerate(candidates, start=1)
+        ]
+    )
     db.add(
         AuditLog(
             actor_id=admin.id,
             action="pilot.dry_run" if payload.dry_run else "pilot.create",
             target_type="pilot_run",
             target_id=str(pilot.id),
-            details={"size": pilot.size, "estimate_hash": digest},
+            details={
+                "size": pilot.size,
+                "estimate_hash": digest,
+                "membership_hash": membership_hash,
+                "first_selected_rank": candidates[0].original_tranco_rank,
+                "last_selected_rank": candidates[-1].original_tranco_rank,
+            },
         )
     )
     await db.commit()
@@ -712,6 +744,8 @@ async def create_pilot(payload: PilotInput, _: Csrf, admin: AdminUser, db: Db) -
         "dry_run": pilot.dry_run,
         "estimate": estimate,
         "estimate_hash": digest,
+        "membership_count": len(candidates),
+        "membership_hash": membership_hash,
         "jobs_dispatched": 0,
     }
 
@@ -763,25 +797,39 @@ async def pilot_progress(pilot_id: uuid.UUID, _: CurrentUser, db: Db) -> dict[st
 
 
 async def _dispatch_pilot_batch(db: Db, pilot: PilotRun, admin: User) -> int:
-    existing_ids = select(PilotItem.website_id).where(PilotItem.pilot_id == pilot.id)
-    websites = list(
+    active = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(PilotItem)
+            .join(ClassificationRun, ClassificationRun.id == PilotItem.classification_run_id)
+            .where(
+                PilotItem.pilot_id == pilot.id,
+                ClassificationRun.status.in_(
+                    (RunStatus.PENDING, RunStatus.RETRYING, RunStatus.RUNNING)
+                ),
+            )
+        )
+        or 0
+    )
+    slots = max(0, pilot.capacity_limit - active)
+    members = list(
         (
             await db.scalars(
-                select(Website)
+                select(PilotItem)
                 .where(
-                    Website.tranco_rank >= pilot.rank_start,
-                    Website.tranco_rank < pilot.rank_start + pilot.size,
-                    Website.id.not_in(existing_ids),
+                    PilotItem.pilot_id == pilot.id,
+                    PilotItem.classification_run_id.is_(None),
+                    PilotItem.status == "pending",
                 )
-                .order_by(Website.tranco_rank)
-                .limit(pilot.capacity_limit)
+                .order_by(PilotItem.selection_order)
+                .limit(slots)
             )
         ).all()
     )
     runs: list[ClassificationRun] = []
-    for website in websites:
+    for member in members:
         run = ClassificationRun(
-            website_id=website.id,
+            website_id=member.website_id,
             requested_by_id=admin.id,
             queue_name=QueueName.STANDARD,
             priority=3,
@@ -790,14 +838,8 @@ async def _dispatch_pilot_batch(db: Db, pilot: PilotRun, admin: User) -> int:
         )
         db.add(run)
         await db.flush()
-        db.add(
-            PilotItem(
-                pilot_id=pilot.id,
-                website_id=website.id,
-                classification_run_id=run.id,
-                status="queued",
-            )
-        )
+        member.classification_run_id = run.id
+        member.status = "queued"
         runs.append(run)
     pilot.queued_count += len(runs)
     pilot.status = PilotStatus.RUNNING
@@ -837,7 +879,7 @@ async def control_pilot(
                 await db.scalars(
                     select(PilotItem).where(
                         PilotItem.pilot_id == pilot.id,
-                        PilotItem.status.in_(("pending", "queued")),
+                        PilotItem.status.in_(("pending", "queued", "running", "retrying")),
                     )
                 )
             ).all()
@@ -869,6 +911,20 @@ async def export_pilot(pilot_id: uuid.UUID, _: CurrentUser, db: Db) -> Response:
     pilot = await db.get(PilotRun, pilot_id)
     if pilot is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Pilot not found")
+    memberships = (
+        await db.execute(
+            select(
+                PilotItem.selection_order,
+                PilotItem.website_id,
+                PilotItem.original_tranco_rank,
+                PilotItem.status,
+                Website.domain,
+            )
+            .join(Website, Website.id == PilotItem.website_id)
+            .where(PilotItem.pilot_id == pilot.id)
+            .order_by(PilotItem.selection_order)
+        )
+    ).all()
     payload = {
         "id": str(pilot.id),
         "size": pilot.size,
@@ -878,6 +934,16 @@ async def export_pilot(pilot_id: uuid.UUID, _: CurrentUser, db: Db) -> Response:
         "classifier_version_id": str(pilot.classifier_version_id),
         "estimate": pilot.estimate,
         "estimate_hash": pilot.estimate_hash,
+        "memberships": [
+            {
+                "selection_order": row.selection_order,
+                "website_id": str(row.website_id),
+                "domain": row.domain,
+                "original_tranco_rank": row.original_tranco_rank,
+                "status": row.status,
+            }
+            for row in memberships
+        ],
     }
     return Response(
         json.dumps(payload, sort_keys=True),

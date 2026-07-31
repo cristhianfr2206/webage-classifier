@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import get_db
@@ -13,6 +14,8 @@ from app.models import (
     Base,
     Category,
     ClassifierVersion,
+    PilotItem,
+    PilotRun,
     PolicyVersion,
     Role,
     RulesetVersion,
@@ -57,6 +60,7 @@ async def evaluation_db() -> AsyncIterator[tuple[async_sessionmaker[AsyncSession
                         registrable_domain=f"fixture-{rank}.example",
                         canonical_url=f"https://fixture-{rank}.example",
                         tranco_rank=rank,
+                        pilot_eligible=True,
                     )
                     for rank in range(1, 101)
                 ],
@@ -147,6 +151,20 @@ async def test_dry_run_dispatches_no_jobs_and_is_reproducible(
     assert first.json()["jobs_dispatched"] == 0
     assert first.json()["estimate_hash"] == second.json()["estimate_hash"]
     assert first.json()["estimate"]["pending_domains"] == 100
+    assert first.json()["membership_count"] == 100
+    async with evaluation_db[0]() as db:
+        memberships = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == uuid.UUID(first.json()["id"]))
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+    assert len(memberships) == 100
+    assert [item.selection_order for item in memberships] == list(range(1, 101))
+    assert [item.original_tranco_rank for item in memberships] == list(range(1, 101))
 
 
 async def test_full_million_pilot_is_rejected(
@@ -160,3 +178,125 @@ async def test_full_million_pilot_is_rejected(
         {"size": 1_000_000, "dry_run": True, "capacity_limit": 100},
     )
     assert response.status_code == 422
+
+
+async def test_non_contiguous_duplicate_ranks_persist_stable_membership(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+) -> None:
+    maker, admin, _ = evaluation_db
+    async with maker() as db:
+        for rank in (7, 12):
+            website = await db.scalar(select(Website).where(Website.tranco_rank == rank))
+            assert website is not None
+            website.pilot_eligible = False
+        db.add_all(
+            [
+                Website(
+                    domain="replacement-101.example",
+                    registrable_domain="replacement-101.example",
+                    canonical_url="https://replacement-101.example",
+                    tranco_rank=101,
+                    pilot_eligible=True,
+                ),
+                Website(
+                    domain="replacement-102.example",
+                    registrable_domain="replacement-102.example",
+                    canonical_url="https://replacement-102.example",
+                    tranco_rank=102,
+                    pilot_eligible=True,
+                ),
+                Website(
+                    domain="stale-duplicate-rank.example",
+                    registrable_domain="stale-duplicate-rank.example",
+                    canonical_url="https://stale-duplicate-rank.example",
+                    tranco_rank=2,
+                    pilot_eligible=True,
+                ),
+            ]
+        )
+        await db.commit()
+
+    payload = {"size": 100, "rank_start": 1, "dry_run": True, "capacity_limit": 10}
+    first = await request("POST", "/api/pilots", admin, payload)
+    second = await request("POST", "/api/pilots", admin, payload)
+    assert first.status_code == second.status_code == 201
+
+    async def membership(pilot_id: str) -> list[tuple[uuid.UUID, int, int]]:
+        async with maker() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        PilotItem.website_id,
+                        PilotItem.selection_order,
+                        PilotItem.original_tranco_rank,
+                    )
+                    .where(PilotItem.pilot_id == uuid.UUID(pilot_id))
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+            return [(row.website_id, row.selection_order, row.original_tranco_rank) for row in rows]
+
+    first_members = await membership(first.json()["id"])
+    second_members = await membership(second.json()["id"])
+    assert first_members == second_members
+    assert len(first_members) == 100
+    assert len({item[0] for item in first_members}) == 100
+    assert len({item[2] for item in first_members}) == 100
+    assert [item[1] for item in first_members] == list(range(1, 101))
+    assert first_members[-1][2] == 102
+
+
+async def test_pilot_creation_rejects_insufficient_eligible_websites(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+) -> None:
+    _, admin, _ = evaluation_db
+    response = await request(
+        "POST",
+        "/api/pilots",
+        admin,
+        {"size": 100, "rank_start": 2, "dry_run": True, "capacity_limit": 10},
+    )
+    assert response.status_code == 422
+    assert "Only 99 pilot-eligible websites" in response.json()["detail"]
+
+
+async def test_pause_resume_reuses_persisted_membership(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maker, admin, _ = evaluation_db
+
+    async def no_dispatch(_: object) -> None:
+        return None
+
+    monkeypatch.setattr("app.routers.evaluation.dispatch_run", no_dispatch)
+    created = await request(
+        "POST",
+        "/api/pilots",
+        admin,
+        {"size": 100, "rank_start": 1, "dry_run": False, "capacity_limit": 10},
+    )
+    assert created.status_code == 201
+    pilot_id = created.json()["id"]
+
+    async def ids() -> list[uuid.UUID]:
+        async with maker() as db:
+            return list(
+                (
+                    await db.scalars(
+                        select(PilotItem.website_id)
+                        .where(PilotItem.pilot_id == uuid.UUID(pilot_id))
+                        .order_by(PilotItem.selection_order)
+                    )
+                ).all()
+            )
+
+    original = await ids()
+    assert (await request("POST", f"/api/pilots/{pilot_id}/start", admin)).status_code == 200
+    assert (await request("POST", f"/api/pilots/{pilot_id}/pause", admin)).status_code == 200
+    assert (await request("POST", f"/api/pilots/{pilot_id}/resume", admin)).status_code == 200
+    assert await ids() == original
+    async with maker() as db:
+        pilot = await db.get(PilotRun, uuid.UUID(pilot_id))
+        assert pilot is not None
+        assert pilot.queued_count == 10

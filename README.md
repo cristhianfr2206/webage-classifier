@@ -11,6 +11,10 @@ agreement and adjudication, batch evaluation, calibration, separate category and
 policy metrics, audited ruleset versioning, manual review, and controlled Tranco
 pilots. Pilot sizes are restricted to 100, 1,000, and 10,000; dry-runs dispatch no
 work and generate reproducible capacity, runtime, cost, and storage estimates.
+Pilot membership is selected once from eligible websites at or after the requested
+minimum Tranco rank, ordered by original rank and stable ID, then persisted with its
+original ranks. Rejected or duplicate ranks are skipped without renumbering, and
+creation fails if the full requested membership cannot be stored.
 
 See [evaluation datasets](docs/evaluation-guide.md),
 [classifier versioning](docs/classifier-versioning.md),
