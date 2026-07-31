@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     enqueue_rate_limit: int = Field(default=20, ge=1, le=1000)
     enqueue_rate_window_seconds: int = Field(default=60, ge=10, le=3600)
     bulk_enqueue_limit: int = Field(default=1000, ge=1, le=10000)
+    ut1_fixture_path: str = ""
     browser_redis_url: str = "redis://redis:6379/1"
     browser_worker_concurrency: int = Field(default=1, ge=1, le=4)
     browser_contexts_per_worker: int = Field(default=1, ge=1, le=4)

@@ -19,10 +19,28 @@ from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.inspector import InspectionError
 from app.job_control import DomainLock, retry_delay, should_retry
-from app.models import BrowserStatus, ClassificationRun, QueueName, RunStatus, Website
+from app.models import (
+    BrowserStatus,
+    ClassificationRun,
+    QueueName,
+    RunStatus,
+    Website,
+    WebsiteClassification,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _has_exact_offline_evidence(classifications: list[WebsiteClassification]) -> bool:
+    return any(
+        any(
+            evidence.get("source") == "offline_ut1" and evidence.get("match") == "exact"
+            for evidence in classification.evidence
+            if isinstance(evidence, dict)
+        )
+        for classification in classifications
+    )
 
 
 async def _domain_for_run(run_id: uuid.UUID) -> str | None:
@@ -39,6 +57,15 @@ async def _execute(run_id: uuid.UUID) -> None:
 
 async def _enqueue_browser_fallback(run_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
+        classifications = list(
+            (
+                await db.scalars(
+                    select(WebsiteClassification).where(WebsiteClassification.run_id == run_id)
+                )
+            ).all()
+        )
+        if _has_exact_offline_evidence(classifications):
+            return
         inspection = await create_automatic_browser_fallback(db, settings, run_id)
         if inspection is not None:
             try:
