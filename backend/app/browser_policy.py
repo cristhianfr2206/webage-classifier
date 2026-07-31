@@ -1,6 +1,12 @@
 from urllib.parse import urlsplit
 
-from app.ssrf import Resolver, UnsafeTargetError, resolve_public_target, system_resolver
+from app.ssrf import (
+    DnsResolutionError,
+    Resolver,
+    UnsafeTargetError,
+    resolve_public_target,
+    system_resolver,
+)
 
 ALLOWED_SCHEMES = {"http", "https"}
 
@@ -18,6 +24,8 @@ async def validate_browser_url(value: str, resolver: Resolver = system_resolver)
         raise BrowserPolicyError("unsafe_scheme")
     try:
         target, _ = await resolve_public_target(value, resolver)
+    except DnsResolutionError as exc:
+        raise BrowserPolicyError(exc.code) from exc
     except (UnsafeTargetError, ValueError, OSError) as exc:
         raise BrowserPolicyError("unsafe_destination") from exc
     return target.url

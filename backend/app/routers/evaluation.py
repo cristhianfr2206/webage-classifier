@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.config import get_settings
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
 from app.evaluation import EvaluationInputError, csv_safe, parse_dataset, pilot_estimate
 from app.evaluation_celery_app import evaluation_celery_app
@@ -673,12 +674,13 @@ async def create_pilot(payload: PilotInput, _: Csrf, admin: AdminUser, db: Db) -
                 f"at or after Tranco rank {payload.rank_start}; {payload.size} required"
             ),
         )
+    settings = get_settings()
     estimate, digest = pilot_estimate(
         size=payload.size,
         pending=len(candidates),
         capacity=payload.capacity_limit,
-        browser_rate=0.20,
-        ai_rate=0.05,
+        browser_rate=settings.pilot_browser_fallback_rate,
+        ai_rate=settings.pilot_ai_fallback_rate if settings.ai_enabled else 0,
         static_ms=500,
         browser_ms=15_000,
         ai_ms=5_000,

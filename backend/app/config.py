@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     inspector_max_response_bytes: int = Field(default=1_000_000, ge=1024, le=5_000_000)
     inspector_max_text_characters: int = Field(default=50_000, ge=1000, le=200_000)
     inspector_max_redirects: int = Field(default=5, ge=0, le=10)
+    dns_resolution_timeout_seconds: float = Field(default=3.0, ge=0.1, le=15)
+    dns_max_retries: int = Field(default=2, ge=0, le=5)
     redis_url: str = "redis://redis:6379/0"
     celery_worker_concurrency: int = Field(default=2, ge=1, le=32)
     task_soft_time_limit_seconds: int = Field(default=45, ge=10, le=300)

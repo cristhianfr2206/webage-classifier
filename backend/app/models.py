@@ -256,6 +256,9 @@ class BrowserInspection(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("classification_runs.id", ondelete="CASCADE"), unique=True, index=True
     )
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="SET NULL"), index=True
+    )
     status: Mapped[BrowserStatus] = mapped_column(
         Enum(BrowserStatus, name="browser_status"), default=BrowserStatus.PENDING, index=True
     )
@@ -284,7 +287,7 @@ class BrowserInspection(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
-    run: Mapped[ClassificationRun] = relationship()
+    run: Mapped[ClassificationRun] = relationship(foreign_keys=[run_id])
 
 
 class AIClassification(Base):

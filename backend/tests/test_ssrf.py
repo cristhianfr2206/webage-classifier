@@ -1,6 +1,15 @@
+import asyncio
+import socket
+
 import pytest
 
-from app.ssrf import UnsafeTargetError, is_public_address, validate_public_target
+from app.ssrf import (
+    DnsResolutionError,
+    UnsafeTargetError,
+    is_public_address,
+    system_resolver,
+    validate_public_target,
+)
 
 
 @pytest.mark.parametrize(
@@ -45,3 +54,37 @@ async def test_empty_dns_results_are_rejected() -> None:
 
     with pytest.raises(UnsafeTargetError):
         await validate_public_target("https://example.com", empty_resolver)
+
+
+async def test_transient_dns_failure_is_retried_within_current_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    calls = 0
+
+    async def resolve(*_: object, **__: object) -> list[tuple[object, ...]]:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise socket.gaierror(socket.EAI_AGAIN, "temporary")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", resolve)
+    assert await system_resolver("example.com", 443) == ["93.184.216.34"]
+    assert calls == 3
+
+
+async def test_permanent_dns_failure_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = asyncio.get_running_loop()
+    calls = 0
+
+    async def resolve(*_: object, **__: object) -> list[tuple[object, ...]]:
+        nonlocal calls
+        calls += 1
+        raise socket.gaierror(socket.EAI_NONAME, "not found")
+
+    monkeypatch.setattr(loop, "getaddrinfo", resolve)
+    with pytest.raises(DnsResolutionError, match="dns_not_found") as error:
+        await system_resolver("missing.example", 443)
+    assert error.value.transient is False
+    assert calls == 1

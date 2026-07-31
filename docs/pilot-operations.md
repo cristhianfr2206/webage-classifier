@@ -23,3 +23,18 @@ hashes the canonical estimate for export and comparison.
 Live orchestration is persistent, version-pinned, capacity-bounded, pausable,
 resumable, and cancellable. Existing duplicate prevention, locks, SSRF protections,
 browser isolation, AI limits, and prior-classification preservation remain active.
+
+Pausing prevents new persisted members from being dispatched. Maintenance
+reconciliation continues to record terminal outcomes for work already in flight;
+resuming starts with the next undispatched membership and never recalculates the set.
+
+Static failures retain normalized reason codes. Transient DNS failures and timeouts
+use bounded resolver retries; permanent no-address results are not repeatedly
+retried. Browser recovery is limited to potentially user-facing HTTP failures such
+as blocking, bounded redirect failures, fetch failures, or insufficient evidence.
+Unsafe destinations, DNS failures, oversized or non-HTML responses, and domains that
+appear to be infrastructure, CDN, or DNS endpoints are not sent to Playwright.
+
+Browser workers intentionally default to one concurrent context. Pilot capacity
+limits total classification work but does not override the separately bounded
+browser-worker concurrency.

@@ -48,7 +48,7 @@ browser_celery_app.conf.update(
         },
         "recover-stale-browser-runs": {
             "task": "app.browser_tasks.recover_stale_browser_runs",
-            "schedule": 300.0,
+            "schedule": 30.0,
             "options": {"queue": "maintenance", "routing_key": "maintenance"},
         },
     },

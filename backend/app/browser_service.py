@@ -26,6 +26,34 @@ class BrowserJobCancelled(RuntimeError):
     pass
 
 
+BROWSER_RECOVERABLE_STATIC_FAILURES = {
+    "classification_unavailable",
+    "fetch_failed",
+    "fetch_rejected",
+    "redirect_limit",
+    "response_timeout",
+}
+INFRASTRUCTURE_DOMAIN_MARKERS = (
+    "cdn",
+    "dns",
+    "gstatic",
+    "sdk",
+    "static",
+    "tagmanager",
+    "trafficmanager",
+    "usercontent",
+    "video",
+)
+
+
+def failure_browser_fallback_eligible(domain: str, failure_code: str) -> bool:
+    """Conservatively route only browser-recoverable, user-facing destinations."""
+    lowered = domain.lower()
+    return failure_code in BROWSER_RECOVERABLE_STATIC_FAILURES and not any(
+        marker in lowered for marker in INFRASTRUCTURE_DOMAIN_MARKERS
+    )
+
+
 def should_use_browser(
     static_text: str, confidence: int, settings: Settings, *, javascript_likely: bool = False
 ) -> bool:
@@ -81,10 +109,54 @@ async def create_automatic_browser_fallback(
     await db.flush()
     inspection = BrowserInspection(
         run_id=run.id,
+        source_run_id=source_run.id,
         status=BrowserStatus.PENDING,
         trigger="low_confidence"
         if confidence < settings.browser_confidence_threshold
         else "static_content",
+        task_id=task_id,
+        max_attempts=settings.browser_max_retries + 1,
+    )
+    db.add(inspection)
+    await db.commit()
+    await db.refresh(inspection)
+    return inspection
+
+
+async def create_failure_browser_fallback(
+    db: AsyncSession,
+    settings: Settings,
+    source_run_id: uuid.UUID,
+    failure_code: str,
+) -> BrowserInspection | None:
+    source_run = await db.get(ClassificationRun, source_run_id)
+    if source_run is None or source_run.status != RunStatus.FAILED:
+        return None
+    website = await db.get(Website, source_run.website_id)
+    if website is None or not failure_browser_fallback_eligible(website.domain, failure_code):
+        return None
+    existing = await db.scalar(
+        select(BrowserInspection).where(BrowserInspection.source_run_id == source_run.id)
+    )
+    if existing is not None:
+        return None
+    task_id = str(uuid.uuid4())
+    run = ClassificationRun(
+        website_id=source_run.website_id,
+        requested_by_id=source_run.requested_by_id,
+        queue_name=QueueName.BROWSER,
+        priority=5,
+        task_id=task_id,
+        max_attempts=settings.browser_max_retries + 1,
+        classifier_version_id=source_run.classifier_version_id,
+    )
+    db.add(run)
+    await db.flush()
+    inspection = BrowserInspection(
+        run_id=run.id,
+        source_run_id=source_run.id,
+        status=BrowserStatus.PENDING,
+        trigger="static_failure",
         task_id=task_id,
         max_attempts=settings.browser_max_retries + 1,
     )

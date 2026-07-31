@@ -3,6 +3,7 @@ import pytest
 
 from app.config import Settings
 from app.inspector import InspectionError, WebsiteInspector
+from app.ssrf import DnsResolutionError
 
 
 def settings(**overrides: object) -> Settings:
@@ -67,3 +68,11 @@ async def test_response_size_and_content_type_are_enforced() -> None:
         await WebsiteInspector(
             settings(), resolver=public_resolver, transport=httpx.MockTransport(json)
         ).inspect("https://example.com")
+
+
+async def test_dns_failure_is_a_controlled_inspection_outcome() -> None:
+    async def missing(_: str, __: int) -> list[str]:
+        raise DnsResolutionError("dns_not_found", transient=False)
+
+    with pytest.raises(InspectionError, match="dns_not_found"):
+        await WebsiteInspector(settings(), resolver=missing).inspect("https://missing.example")

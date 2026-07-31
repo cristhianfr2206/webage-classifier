@@ -26,23 +26,42 @@ async def queues(_: AdminUser, db: Db) -> QueueStatusResponse:
 
 @router.get("/workers", response_model=WorkerHealthResponse)
 async def workers(_: AdminUser) -> WorkerHealthResponse:
+    settings = get_settings()
+    ai_probe = (
+        asyncio.to_thread(ai_celery_app.control.inspect(timeout=1.0).ping)
+        if settings.ai_enabled
+        else asyncio.sleep(0, result={})
+    )
     normal, browser, ai, evaluation = await asyncio.gather(
         asyncio.to_thread(celery_app.control.inspect(timeout=1.0).ping),
         asyncio.to_thread(browser_celery_app.control.inspect(timeout=1.0).ping),
-        asyncio.to_thread(ai_celery_app.control.inspect(timeout=1.0).ping),
+        ai_probe,
         asyncio.to_thread(evaluation_celery_app.control.inspect(timeout=1.0).ping),
     )
     names = sorted(set(normal or {}) | set(browser or {}) | set(ai or {}) | set(evaluation or {}))
-    required = (
+    required = [
         "realtime@",
         "standard@",
         "maintenance@",
         "browser_realtime@",
         "browser@",
+        "browser_maintenance@",
         "ai_realtime@",
         "ai@",
+        "ai_maintenance@",
         "evaluation@",
         "evaluation_maintenance@",
+    ]
+    ai_prefixes = ["ai_realtime@", "ai@", "ai_maintenance@"]
+    if not settings.ai_enabled:
+        required = [prefix for prefix in required if prefix not in ai_prefixes]
+    missing = [prefix for prefix in required if not any(name.startswith(prefix) for name in names)]
+    optional_disabled = ai_prefixes if not settings.ai_enabled else []
+    idle = [name for name in names if any(name.startswith(prefix) for prefix in optional_disabled)]
+    return WorkerHealthResponse(
+        healthy=not missing,
+        workers=names,
+        required_missing=missing,
+        optional_disabled=optional_disabled,
+        healthy_idle=idle,
     )
-    healthy = all(any(name.startswith(prefix) for name in names) for prefix in required)
-    return WorkerHealthResponse(healthy=healthy, workers=names)

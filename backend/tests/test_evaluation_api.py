@@ -13,12 +13,15 @@ from app.main import app
 from app.models import (
     Base,
     Category,
+    ClassificationRun,
     ClassifierVersion,
     PilotItem,
     PilotRun,
+    PilotStatus,
     PolicyVersion,
     Role,
     RulesetVersion,
+    RunStatus,
     User,
     Website,
 )
@@ -151,6 +154,7 @@ async def test_dry_run_dispatches_no_jobs_and_is_reproducible(
     assert first.json()["jobs_dispatched"] == 0
     assert first.json()["estimate_hash"] == second.json()["estimate_hash"]
     assert first.json()["estimate"]["pending_domains"] == 100
+    assert first.json()["estimate"]["expected_ai_calls"] == 0
     assert first.json()["membership_count"] == 100
     async with evaluation_db[0]() as db:
         memberships = list(
@@ -300,3 +304,75 @@ async def test_pause_resume_reuses_persisted_membership(
         pilot = await db.get(PilotRun, uuid.UUID(pilot_id))
         assert pilot is not None
         assert pilot.queued_count == 10
+
+
+async def test_paused_pilot_reconciles_settled_work_without_dispatch(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maker, admin, _ = evaluation_db
+    dispatched: list[object] = []
+
+    async def capture(run: object) -> None:
+        dispatched.append(run)
+
+    monkeypatch.setattr("app.routers.evaluation.dispatch_run", capture)
+    created = await request(
+        "POST",
+        "/api/pilots",
+        admin,
+        {"size": 100, "rank_start": 1, "dry_run": False, "capacity_limit": 10},
+    )
+    pilot_id = uuid.UUID(created.json()["id"])
+    assert (await request("POST", f"/api/pilots/{pilot_id}/start", admin)).status_code == 200
+    assert len(dispatched) == 10
+    assert (await request("POST", f"/api/pilots/{pilot_id}/pause", admin)).status_code == 200
+
+    async with maker() as db:
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        original_membership = [item.website_id for item in items]
+        for index, item in enumerate(items[:10]):
+            run = await db.get(ClassificationRun, item.classification_run_id)
+            assert run is not None
+            if index < 6:
+                run.status = RunStatus.COMPLETED
+            elif index < 9:
+                run.status = RunStatus.FAILED
+            else:
+                run.status = RunStatus.RUNNING
+        await db.commit()
+
+    monkeypatch.setattr("app.evaluation_tasks.SessionLocal", maker)
+
+    async def forbidden(_: object) -> None:
+        raise AssertionError("paused reconciliation dispatched work")
+
+    monkeypatch.setattr("app.evaluation_tasks.dispatch_run", forbidden)
+    from app.evaluation_tasks import _advance_pilots
+
+    assert await _advance_pilots() == 0
+    async with maker() as db:
+        pilot = await db.get(PilotRun, pilot_id)
+        assert pilot is not None
+        assert pilot.status == PilotStatus.PAUSED
+        assert pilot.processed_count == 6
+        assert pilot.failed_count == 3
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        assert [item.website_id for item in items] == original_membership
+        assert sum(item.classification_run_id is None for item in items) == 90

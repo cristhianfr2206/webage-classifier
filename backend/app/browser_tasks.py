@@ -5,8 +5,10 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 
+from billiard.exceptions import TimeLimitExceeded, WorkerLostError  # type: ignore[import-untyped]
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
+from celery.signals import task_failure
 from redis import Redis
 from sqlalchemy import select
 
@@ -57,6 +59,7 @@ async def _failure(inspection_id: uuid.UUID, code: str, retrying: bool) -> None:
         if inspection is None or inspection.status in {
             BrowserStatus.COMPLETED,
             BrowserStatus.CANCELLED,
+            BrowserStatus.FAILED,
         }:
             return
         run = await db.get(ClassificationRun, inspection.run_id)
@@ -196,7 +199,7 @@ def recover_stale_browser_runs() -> int:
 
 async def _recover_stale() -> int:
     cutoff = datetime.now(UTC) - timedelta(
-        seconds=settings.browser_task_hard_time_limit_seconds + 30
+        seconds=settings.browser_task_hard_time_limit_seconds + 10
     )
     async with SessionLocal() as db:
         stale = list(
@@ -220,6 +223,32 @@ async def _recover_stale() -> int:
                 run.completed_at = datetime.now(UTC)
         await db.commit()
         return len(stale)
+
+
+@task_failure.connect
+def record_browser_worker_failure(
+    sender: object = None,
+    exception: BaseException | None = None,
+    args: tuple[object, ...] | None = None,
+    **_: object,
+) -> None:
+    if getattr(sender, "name", None) != "app.browser_tasks.inspect_browser" or not args:
+        return
+    try:
+        inspection_id = uuid.UUID(str(args[0]))
+    except ValueError:
+        return
+    if isinstance(exception, TimeLimitExceeded | SoftTimeLimitExceeded):
+        code = "task_timeout"
+    elif isinstance(exception, WorkerLostError):
+        code = "browser_worker_lost"
+    else:
+        return
+    logger.error(
+        "browser_worker_task_failure",
+        extra={"inspection_id": str(inspection_id), "error_type": type(exception).__name__},
+    )
+    _run(_failure(inspection_id, code, False))
 
 
 for registered_name in tuple(browser_celery_app.tasks):

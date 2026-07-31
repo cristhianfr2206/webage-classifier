@@ -10,7 +10,8 @@ RETRYABLE_ERROR_CODES = {
     "response_timeout",
     "redirect_limit",
     "task_timeout",
-    "worker_error",
+    "dns_temporary_failure",
+    "dns_timeout",
 }
 TERMINAL_STATUSES = {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
 ALLOWED_TRANSITIONS = {

@@ -12,6 +12,7 @@ from app.browser_inspector import BrowserInspectionError, BrowserResult
 from app.browser_service import (
     BrowserJobCancelled,
     create_automatic_browser_fallback,
+    create_failure_browser_fallback,
     execute_browser_classification,
 )
 from app.browser_tasks import _failure, _recover_stale
@@ -263,6 +264,32 @@ async def test_duplicate_automatic_fallback_creates_only_one_active_run(
         first = await create_automatic_browser_fallback(db, get_settings(), source_run.id)
         second = await create_automatic_browser_fallback(db, get_settings(), source_run.id)
         assert first is not None
+        assert second is None
+
+
+async def test_failed_static_run_creates_one_linked_browser_recovery(
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    inspection_id, _ = await seed_browser_run(session_maker, prior=False)
+    async with session_maker() as db:
+        inspection = await db.get(BrowserInspection, inspection_id)
+        assert inspection is not None
+        source_run = await db.get(ClassificationRun, inspection.run_id)
+        assert source_run is not None
+        source_run.status = RunStatus.FAILED
+        source_run.error_code = "fetch_rejected"
+        source_run.queue_name = QueueName.STANDARD
+        await db.delete(inspection)
+        await db.commit()
+
+        first = await create_failure_browser_fallback(
+            db, get_settings(), source_run.id, "fetch_rejected"
+        )
+        second = await create_failure_browser_fallback(
+            db, get_settings(), source_run.id, "fetch_rejected"
+        )
+        assert first is not None
+        assert first.source_run_id == source_run.id
         assert second is None
 
 

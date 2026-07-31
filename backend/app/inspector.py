@@ -5,7 +5,13 @@ import httpx
 
 from app.config import Settings
 from app.extraction import ExtractedPage, extract_page
-from app.ssrf import Resolver, UnsafeTargetError, resolve_public_target, system_resolver
+from app.ssrf import (
+    DnsResolutionError,
+    Resolver,
+    UnsafeTargetError,
+    resolve_public_target,
+    system_resolver,
+)
 
 
 class InspectionError(RuntimeError):
@@ -47,6 +53,8 @@ class WebsiteInspector:
             for redirect_count in range(self.settings.inspector_max_redirects + 1):
                 try:
                     target, addresses = await resolve_public_target(current, self.resolver)
+                except DnsResolutionError as exc:
+                    raise InspectionError(exc.code) from exc
                 except (UnsafeTargetError, ValueError) as exc:
                     raise InspectionError("unsafe_destination") from exc
                 parsed = urlsplit(target.url)

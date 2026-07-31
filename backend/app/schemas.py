@@ -191,6 +191,9 @@ class QueueStatusResponse(BaseModel):
 class WorkerHealthResponse(BaseModel):
     healthy: bool
     workers: list[str]
+    required_missing: list[str] = Field(default_factory=list)
+    optional_disabled: list[str] = Field(default_factory=list)
+    healthy_idle: list[str] = Field(default_factory=list)
 
 
 class BrowserInspectionRequest(BaseModel):

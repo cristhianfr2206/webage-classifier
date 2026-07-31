@@ -12,7 +12,7 @@ from redis import Redis
 from sqlalchemy import select
 
 from app.browser_queueing import dispatch_browser
-from app.browser_service import create_automatic_browser_fallback
+from app.browser_service import create_automatic_browser_fallback, create_failure_browser_fallback
 from app.celery_app import celery_app
 from app.classification_service import CancelledJob, execute_classification
 from app.config import get_settings
@@ -50,6 +50,18 @@ async def _enqueue_browser_fallback(run_id: uuid.UUID) -> None:
                 if run is not None:
                     run.status = RunStatus.FAILED
                     run.error_code = "enqueue_failed"
+                await db.commit()
+
+
+async def _enqueue_browser_failure_fallback(run_id: uuid.UUID, failure_code: str) -> None:
+    async with SessionLocal() as db:
+        inspection = await create_failure_browser_fallback(db, settings, run_id, failure_code)
+        if inspection is not None:
+            try:
+                await dispatch_browser(inspection, QueueName.BROWSER)
+            except Exception:
+                inspection.status = BrowserStatus.FAILED
+                inspection.failure_code = "enqueue_failed"
                 await db.commit()
 
 
@@ -122,7 +134,8 @@ def classify_website(self: Task, run_id_value: str) -> None:
         code = str(exc)
         if should_retry(code, self.request.retries, settings.task_max_retries):
             _retry(self, run_id, code)
-        _run(_record_failure(run_id, "inspection_failed", retrying=False))
+        _run(_record_failure(run_id, code, retrying=False))
+        _run(_enqueue_browser_failure_fallback(run_id, code))
     except SoftTimeLimitExceeded:
         if self.request.retries < settings.task_max_retries:
             _retry(self, run_id, "task_timeout")

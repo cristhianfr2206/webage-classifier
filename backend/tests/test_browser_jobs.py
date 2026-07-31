@@ -1,5 +1,5 @@
 from app.browser_celery_app import browser_celery_app
-from app.browser_service import should_use_browser
+from app.browser_service import failure_browser_fallback_eligible, should_use_browser
 from app.config import get_settings
 
 
@@ -9,6 +9,15 @@ def test_browser_fallback_is_http_first_and_threshold_bounded() -> None:
     assert should_use_browser("enough rendered-looking content " * 20, 20, settings)
     assert should_use_browser("enough content " * 30, 90, settings, javascript_likely=True)
     assert not should_use_browser("enough static content " * 30, 90, settings)
+
+
+def test_static_failure_browser_fallback_is_conservative() -> None:
+    assert failure_browser_fallback_eligible("example.com", "fetch_rejected")
+    assert failure_browser_fallback_eligible("example.com", "classification_unavailable")
+    assert not failure_browser_fallback_eligible("gstatic.com", "fetch_rejected")
+    assert not failure_browser_fallback_eligible("trafficmanager.net", "fetch_failed")
+    assert not failure_browser_fallback_eligible("example.com", "dns_not_found")
+    assert not failure_browser_fallback_eligible("example.com", "unsafe_destination")
 
 
 def test_browser_queues_are_separate_priority_queues() -> None:

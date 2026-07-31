@@ -15,6 +15,26 @@ from tests.browser_fixture import FixtureServer
 pytestmark = pytest.mark.browser_integration
 
 
+def chromium_processes() -> set[int]:
+    processes: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().decode(errors="ignore").lower()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if "chromium" in command or "chrome-linux" in command:
+            processes.add(int(entry.name))
+    return processes
+
+
+async def wait_for_processes(expected: set[int], timeout: float = 5) -> None:
+    async with asyncio.timeout(timeout):
+        while chromium_processes() != expected:
+            await asyncio.sleep(0.05)
+
+
 @pytest.fixture
 def browser_fixture() -> Iterator[FixtureServer]:
     server = FixtureServer().start()
@@ -119,11 +139,14 @@ async def test_unsafe_subframe_schemes_do_not_escape_inspection(
 async def test_endless_javascript_times_out_and_next_inspection_succeeds(
     browser_fixture: FixtureServer,
 ) -> None:
+    before = chromium_processes()
     browser = inspector(browser_fixture, browser_navigation_timeout_seconds=1)
     with pytest.raises(BrowserInspectionError, match="navigation_timeout"):
         await browser.inspect(browser_fixture.url("/endless"))
+    await wait_for_processes(before)
     result = await browser.inspect(browser_fixture.url("/js"))
     assert result.page.title == "Rendered title"
+    await wait_for_processes(before)
 
 
 async def test_active_browser_inspection_can_be_cancelled_and_releases_resources(
