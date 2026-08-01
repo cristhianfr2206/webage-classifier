@@ -35,7 +35,9 @@ settings = get_settings()
 def _has_exact_offline_evidence(classifications: list[WebsiteClassification]) -> bool:
     return any(
         any(
-            evidence.get("source") == "offline_ut1" and evidence.get("match") == "exact"
+            evidence.get("source") == "offline_ut1"
+            and evidence.get("match") == "exact"
+            and evidence.get("category") == "education"
             for evidence in classification.evidence
             if isinstance(evidence, dict)
         )

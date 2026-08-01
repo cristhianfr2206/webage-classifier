@@ -13,6 +13,8 @@ from app.models import (
     Category,
     ClassificationRun,
     ClassificationSource,
+    ManualReviewCase,
+    ReviewStatus,
     RunStatus,
     Website,
     WebsiteClassification,
@@ -29,6 +31,8 @@ UT1_CATEGORY_ALIASES = {
     "audio-video": "entertainment",
     "social_networks": "social",
 }
+UT1_UNSUPPORTED_CATEGORIES = {"shopping", "games"}
+UT1_HIGH_RISK_CATEGORIES = {"adult", "gambling"}
 
 
 def _offline_lookup(settings: Settings, domain: str) -> LookupResult | None:
@@ -81,10 +85,12 @@ async def execute_classification(
     await db.commit()
 
     offline = _offline_lookup(settings, website.domain)
-    if offline is not None and offline.match_type == "exact":
-        category_slug = UT1_CATEGORY_ALIASES.get(
-            offline.source_category or "", offline.source_category or ""
-        )
+    if (
+        offline is not None
+        and offline.match_type == "exact"
+        and offline.source_category == "education"
+    ):
+        category_slug = "education"
         category = await db.scalar(select(Category).where(Category.slug == category_slug))
         if category is not None:
             policy = (
@@ -168,16 +174,28 @@ async def execute_classification(
             else policies.get(recommended_age_policy_name(inspected.page, score.slug))
         )
         evidence = list(score.evidence)
-        if offline is not None and offline.match_type == "parent-domain":
-            evidence.append(
-                {
-                    "source": "offline_ut1",
-                    "match": "parent-domain",
-                    "category": offline.source_category,
-                    "normalized_domain": offline.normalized_domain,
-                    "confidence": 20,
-                }
-            )
+        if offline is not None:
+            feed_category = offline.source_category or ""
+            offline_evidence: dict[str, object] = {
+                "source": "offline_ut1",
+                "match": offline.match_type,
+                "category": feed_category,
+                "normalized_domain": offline.normalized_domain,
+                "confidence": 20,
+            }
+            mapped_category = UT1_CATEGORY_ALIASES.get(feed_category)
+            if mapped_category is not None:
+                offline_evidence["mapped_category"] = mapped_category
+                offline_evidence["status"] = "preliminary"
+            elif feed_category in UT1_UNSUPPORTED_CATEGORIES:
+                offline_evidence["status"] = "unsupported"
+            elif feed_category in UT1_HIGH_RISK_CATEGORIES:
+                offline_evidence["status"] = "high_risk"
+                offline_evidence["risk"] = "high"
+                offline_evidence["manual_review_required"] = True
+            else:
+                offline_evidence["status"] = "unknown"
+            evidence.append(offline_evidence)
         item = WebsiteClassification(
             website_id=website.id,
             run_id=run.id,
@@ -195,6 +213,19 @@ async def execute_classification(
         classifications.append(item)
     if not classifications:
         raise InspectionError("classification_unavailable")
+    if offline is not None and (offline.source_category or "") in UT1_HIGH_RISK_CATEGORIES:
+        existing_review = await db.scalar(
+            select(ManualReviewCase).where(ManualReviewCase.classification_run_id == run.id)
+        )
+        if existing_review is None:
+            db.add(
+                ManualReviewCase(
+                    website_id=website.id,
+                    classification_run_id=run.id,
+                    status=ReviewStatus.PENDING,
+                    reason="High-risk UT1 evidence requires HTTP confirmation and manual review",
+                )
+            )
     run.status = RunStatus.COMPLETED
     run.completed_at = datetime.now(UTC)
     run.heartbeat_at = datetime.now(UTC)

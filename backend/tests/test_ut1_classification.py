@@ -6,9 +6,10 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.classification_service import execute_classification
+from app.classification_service import UT1_CATEGORY_ALIASES, execute_classification
 from app.config import Settings
 from app.extraction import ExtractedPage
 from app.models import (
@@ -17,6 +18,7 @@ from app.models import (
     Category,
     ClassificationRun,
     ClassificationSource,
+    ManualReviewCase,
     QueueName,
     Role,
     User,
@@ -126,9 +128,95 @@ async def test_parent_match_continues_http_and_records_lower_confidence_evidence
     assert any(item.get("match") == "parent-domain" for item in results[0].evidence)
 
 
-async def test_unknown_and_unconfigured_fixture_continue_existing_http_behavior(
-    maker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("feed_category", ["social_networks", "audio-video"])
+async def test_preliminary_ut1_categories_continue_http(
+    maker: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed_category: str,
 ) -> None:
+    fixture = tmp_path / "ut1.csv"
+    fixture.write_text(f"domain,category\nnetflix.com,{feed_category}\n", encoding="utf-8")
+    run_id = await seed(maker, "netflix.com")
+    called = False
+
+    async def inspect(_: object, __: str) -> Any:
+        nonlocal called
+        called = True
+        return await fake_inspection(__)
+
+    monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", inspect)
+    async with maker() as db:
+        results = await execute_classification(db, settings(str(fixture)), run_id)
+    assert called
+    evidence = next(item for item in results[0].evidence if item.get("source") == "offline_ut1")
+    assert evidence["category"] == feed_category
+    assert evidence["status"] == "preliminary"
+
+
+@pytest.mark.parametrize("feed_category", ["shopping", "games"])
+async def test_unsupported_ut1_categories_do_not_create_final_category(
+    maker: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed_category: str,
+) -> None:
+    fixture = tmp_path / "ut1.csv"
+    fixture.write_text(f"domain,category\nnetflix.com,{feed_category}\n", encoding="utf-8")
+    run_id = await seed(maker, "netflix.com")
+    called = False
+
+    async def inspect(_: object, __: str) -> Any:
+        nonlocal called
+        called = True
+        return await fake_inspection(__)
+
+    monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", inspect)
+    async with maker() as db:
+        results = await execute_classification(db, settings(str(fixture)), run_id)
+    assert called
+    evidence = next(item for item in results[0].evidence if item.get("source") == "offline_ut1")
+    assert evidence["status"] == "unsupported"
+    assert evidence.get("mapped_category") is None
+
+
+@pytest.mark.parametrize("feed_category", ["adult", "gambling"])
+async def test_high_risk_ut1_categories_require_confirmation(
+    maker: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed_category: str,
+) -> None:
+    fixture = tmp_path / "ut1.csv"
+    fixture.write_text(f"domain,category\nnetflix.com,{feed_category}\n", encoding="utf-8")
+    run_id = await seed(maker, "netflix.com")
+    called = False
+
+    async def inspect(_: object, __: str) -> Any:
+        nonlocal called
+        called = True
+        return await fake_inspection(__)
+
+    monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", inspect)
+    async with maker() as db:
+        results = await execute_classification(db, settings(str(fixture)), run_id)
+        review = await db.scalar(
+            select(ManualReviewCase).where(ManualReviewCase.classification_run_id == run_id)
+        )
+    assert called
+    evidence = next(item for item in results[0].evidence if item.get("source") == "offline_ut1")
+    assert evidence["status"] == "high_risk"
+    assert evidence["risk"] == "high"
+    assert evidence["manual_review_required"] is True
+    assert evidence.get("mapped_category") is None
+    assert review is not None
+
+
+async def test_unknown_and_unconfigured_fixture_continue_existing_http_behavior(
+    maker: async_sessionmaker[AsyncSession], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = tmp_path / "ut1.csv"
+    fixture.write_text("domain,category\nnetflix.com,education\n", encoding="utf-8")
     run_id = await seed(maker, "adobe.com")
     called = False
 
@@ -139,7 +227,7 @@ async def test_unknown_and_unconfigured_fixture_continue_existing_http_behavior(
 
     monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", inspect)
     async with maker() as db:
-        results = await execute_classification(db, settings(), run_id)
+        results = await execute_classification(db, settings(str(fixture)), run_id)
     assert called
     assert results[0].evidence[0]["rule"] == "course"
 
@@ -148,8 +236,31 @@ def test_exact_offline_evidence_is_the_browser_skip_signal() -> None:
     from app.tasks import _has_exact_offline_evidence
 
     assert _has_exact_offline_evidence(
-        [SimpleNamespace(evidence=[{"source": "offline_ut1", "match": "exact"}])]
+        [
+            SimpleNamespace(
+                evidence=[{"source": "offline_ut1", "match": "exact", "category": "education"}]
+            )
+        ]
+    )
+    assert not _has_exact_offline_evidence(
+        [
+            SimpleNamespace(
+                evidence=[
+                    {"source": "offline_ut1", "match": "exact", "category": "social_networks"}
+                ]
+            )
+        ]
     )
     assert not _has_exact_offline_evidence(
         [SimpleNamespace(evidence=[{"source": "offline_ut1", "match": "parent-domain"}])]
+    )
+
+
+def test_ut1_aliases_do_not_expand_application_taxonomy() -> None:
+    assert UT1_CATEGORY_ALIASES == {
+        "audio-video": "entertainment",
+        "social_networks": "social",
+    }
+    assert not {"shopping", "games", "adult", "gambling"}.intersection(
+        UT1_CATEGORY_ALIASES.values()
     )
