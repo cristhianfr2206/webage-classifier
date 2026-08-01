@@ -59,6 +59,9 @@ async def _execute(run_id: uuid.UUID) -> None:
 
 async def _enqueue_browser_fallback(run_id: uuid.UUID) -> None:
     async with SessionLocal() as db:
+        run = await db.get(ClassificationRun, run_id)
+        if run is not None and (run.error_code or "").startswith("non_consumer_infrastructure:"):
+            return
         classifications = list(
             (
                 await db.scalars(

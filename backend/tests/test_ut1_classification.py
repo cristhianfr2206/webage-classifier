@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.models import (
     Role,
     User,
     Website,
+    WebsiteClassification,
 )
 
 
@@ -106,6 +108,62 @@ async def test_exact_match_skips_http_and_records_offline_evidence(
         assert results[0].confidence == 95
         assert results[0].evidence[0]["source"] == "offline_ut1"
         assert results[0].evidence[0]["match"] == "exact"
+
+
+async def test_safe_infrastructure_exclusion_skips_http_and_has_no_age_policy(
+    maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="app.classification_service")
+    run_id = await seed(maker, "gtld-servers.net")
+
+    async def unexpected(_: object, __: str) -> None:
+        raise AssertionError("HTTP inspection must be skipped")
+
+    monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", unexpected)
+    async with maker() as db:
+        results = await execute_classification(db, settings(), run_id)
+        run = await db.get(ClassificationRun, run_id)
+        classifications = list(
+            (
+                await db.scalars(
+                    select(WebsiteClassification).where(WebsiteClassification.run_id == run_id)
+                )
+            ).all()
+        )
+    assert results == []
+    assert classifications == []
+    assert run is not None
+    assert run.error_code == "non_consumer_infrastructure:dns_nameserver"
+    assert run.status.value == "completed"
+    record = next(
+        item for item in caplog.records if item.message == "infrastructure_classification_excluded"
+    )
+    assert record.confidence_tier == "safe_exclude"
+    assert record.evidence == "authoritative TLD nameserver hostname"
+
+
+async def test_evidence_only_infrastructure_continues_http(
+    maker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = await seed(maker, "cloudflare.com")
+    called = False
+
+    async def inspect(_: object, __: str) -> Any:
+        nonlocal called
+        called = True
+        return await fake_inspection(__)
+
+    monkeypatch.setattr("app.classification_service.WebsiteInspector.inspect", inspect)
+    async with maker() as db:
+        results = await execute_classification(db, settings(), run_id)
+    assert called
+    assert results[0].category_id is not None
+    detector_evidence = next(
+        item for item in results[0].evidence if item.get("source") == "infrastructure_detector"
+    )
+    assert detector_evidence["confidence_tier"] == "evidence_only"
 
 
 async def test_parent_match_continues_http_and_records_lower_confidence_evidence(

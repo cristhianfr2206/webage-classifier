@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.classifier import classify_page, recommended_age_policy_name
 from app.config import Settings
+from app.infrastructure_detection import detect_infrastructure
 from app.inspector import InspectionError, WebsiteInspector
 from app.models import (
     AgePolicy,
@@ -25,6 +27,9 @@ from app.versioning import rules_for_classifier_version
 
 class CancelledJob(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 UT1_CATEGORY_ALIASES = {
@@ -85,6 +90,23 @@ async def execute_classification(
     await db.commit()
 
     offline = _offline_lookup(settings, website.domain)
+    infrastructure = detect_infrastructure(website.domain)
+    if infrastructure is not None and infrastructure.confidence_tier == "safe_exclude":
+        run.status = RunStatus.COMPLETED
+        run.error_code = f"non_consumer_infrastructure:{infrastructure.infrastructure_type}"
+        run.completed_at = datetime.now(UTC)
+        run.heartbeat_at = datetime.now(UTC)
+        logger.info(
+            "infrastructure_classification_excluded",
+            extra={
+                "domain": infrastructure.domain,
+                "infrastructure_type": infrastructure.infrastructure_type,
+                "confidence_tier": infrastructure.confidence_tier,
+                "evidence": infrastructure.evidence,
+            },
+        )
+        await db.commit()
+        return []
     if (
         offline is not None
         and offline.match_type == "exact"
@@ -174,6 +196,16 @@ async def execute_classification(
             else policies.get(recommended_age_policy_name(inspected.page, score.slug))
         )
         evidence = list(score.evidence)
+        if infrastructure is not None and infrastructure.confidence_tier == "evidence_only":
+            evidence.append(
+                {
+                    "source": "infrastructure_detector",
+                    "confidence_tier": infrastructure.confidence_tier,
+                    "infrastructure_type": infrastructure.infrastructure_type,
+                    "confidence": infrastructure.confidence,
+                    "evidence": infrastructure.evidence,
+                }
+            )
         if offline is not None:
             feed_category = offline.source_category or ""
             offline_evidence: dict[str, object] = {
