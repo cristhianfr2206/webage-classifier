@@ -1,3 +1,5 @@
+import hashlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from app.models import (
     PilotRun,
     PilotStatus,
     PolicyVersion,
+    QueueName,
     Role,
     RulesetVersion,
     RunStatus,
@@ -304,6 +307,121 @@ async def test_pause_resume_reuses_persisted_membership(
         pilot = await db.get(PilotRun, uuid.UUID(pilot_id))
         assert pilot is not None
         assert pilot.queued_count == 10
+
+
+async def test_resume_existing_pending_dispatches_only_linked_pending_runs(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maker, admin, _ = evaluation_db
+    dispatched: list[ClassificationRun] = []
+
+    async def capture(run: ClassificationRun) -> None:
+        dispatched.append(run)
+
+    monkeypatch.setattr("app.routers.evaluation.dispatch_run", capture)
+    created = await request(
+        "POST",
+        "/api/pilots",
+        admin,
+        {"size": 100, "rank_start": 1, "dry_run": False, "capacity_limit": 10},
+    )
+    assert created.status_code == 201
+    pilot_id = uuid.UUID(created.json()["id"])
+
+    async with maker() as db:
+        pilot = await db.get(PilotRun, pilot_id)
+        assert pilot is not None
+        pilot.status = PilotStatus.PAUSED
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        membership_before = [[item.original_tranco_rank, str(item.website_id)] for item in items]
+        for item in items[:2]:
+            run = ClassificationRun(
+                website_id=item.website_id,
+                requested_by_id=admin.id,
+                classifier_version_id=pilot.classifier_version_id,
+                queue_name=QueueName.STANDARD,
+                priority=3,
+                task_id=str(uuid.uuid4()),
+                status=RunStatus.PENDING,
+            )
+            db.add(run)
+            await db.flush()
+            item.classification_run_id = run.id
+            item.status = "running"
+        failed_item = items[10]
+        failed_run = ClassificationRun(
+            website_id=failed_item.website_id,
+            requested_by_id=admin.id,
+            classifier_version_id=pilot.classifier_version_id,
+            queue_name=QueueName.STANDARD,
+            priority=3,
+            task_id=str(uuid.uuid4()),
+            status=RunStatus.FAILED,
+            attempts=2,
+            error_code="worker_error",
+        )
+        db.add(failed_run)
+        await db.flush()
+        failed_item.classification_run_id = failed_run.id
+        failed_item.status = "failed"
+        await db.commit()
+
+    expected_hash = hashlib.sha256(
+        json.dumps(membership_before, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert expected_hash == created.json()["membership_hash"]
+
+    response = await request("POST", f"/api/pilots/{pilot_id}/resume-existing-pending", admin)
+    assert response.status_code == 200
+    assert response.json()["status"] == PilotStatus.PAUSED.value
+    assert response.json()["dispatched"] == 2
+    assert len(dispatched) == 2
+
+    repeated = await request("POST", f"/api/pilots/{pilot_id}/resume-existing-pending", admin)
+    assert repeated.status_code == 200
+    assert repeated.json()["dispatched"] == 0
+    assert len(dispatched) == 2
+
+    async with maker() as db:
+        pilot = await db.get(PilotRun, pilot_id)
+        assert pilot is not None
+        assert pilot.status == PilotStatus.PAUSED
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        membership_after = [[item.original_tranco_rank, str(item.website_id)] for item in items]
+        assert (
+            hashlib.sha256(json.dumps(membership_after, separators=(",", ":")).encode()).hexdigest()
+            == expected_hash
+        )
+        assert sum(item.classification_run_id is None for item in items) == 97
+        assert all(item.classification_run_id is None for item in items[2:10])
+        pending_runs = [
+            await db.get(ClassificationRun, item.classification_run_id) for item in items[:2]
+        ]
+        assert [run.status for run in pending_runs if run is not None] == [
+            RunStatus.RETRYING,
+            RunStatus.RETRYING,
+        ]
+        historical_failed = await db.get(ClassificationRun, failed_item.classification_run_id)
+        assert historical_failed is not None
+        assert historical_failed.status == RunStatus.FAILED
+        assert historical_failed.attempts == 2
 
 
 async def test_paused_pilot_reconciles_settled_work_without_dispatch(

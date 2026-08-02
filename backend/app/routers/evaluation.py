@@ -852,6 +852,37 @@ async def _dispatch_pilot_batch(db: Db, pilot: PilotRun, admin: User) -> int:
     return len(runs)
 
 
+async def _dispatch_existing_pending_pilot_runs(db: Db, pilot: PilotRun) -> list[ClassificationRun]:
+    """Reserve already-linked pending runs for a paused pilot without filling capacity.
+
+    This is deliberately separate from normal pilot resume: normal resume may create
+    new runs for undispatched memberships, whereas this recovery path is limited to
+    runs that were created previously and never reached a worker.
+    """
+    runs = list(
+        (
+            await db.scalars(
+                select(ClassificationRun)
+                .join(PilotItem, PilotItem.classification_run_id == ClassificationRun.id)
+                .where(
+                    PilotItem.pilot_id == pilot.id,
+                    ClassificationRun.status == RunStatus.PENDING,
+                    ClassificationRun.cancel_requested.is_(False),
+                )
+                .with_for_update()
+            )
+        ).all()
+    )
+    for run in runs:
+        # RETRYING is an in-database dispatch reservation. It makes a repeated
+        # recovery request a no-op before the worker has had a chance to start.
+        run.status = RunStatus.RETRYING
+        run.next_retry_at = None
+        run.heartbeat_at = datetime.now(UTC)
+    await db.commit()
+    return runs
+
+
 @router.post("/pilots/{pilot_id}/{action}")
 async def control_pilot(
     pilot_id: uuid.UUID, action: str, _: Csrf, admin: AdminUser, db: Db
@@ -862,7 +893,21 @@ async def control_pilot(
     if pilot.dry_run:
         raise HTTPException(status.HTTP_409_CONFLICT, "Dry-runs dispatch no jobs")
     dispatched = 0
-    if action in {"start", "resume"} and pilot.status in {
+    if action == "resume-existing-pending" and pilot.status == PilotStatus.PAUSED:
+        runs = await _dispatch_existing_pending_pilot_runs(db, pilot)
+        for run in runs:
+            try:
+                await dispatch_run(run)
+            except Exception as exc:
+                run.status = RunStatus.PENDING
+                run.heartbeat_at = None
+                await db.commit()
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "Unable to re-dispatch existing pilot run",
+                ) from exc
+            dispatched += 1
+    elif action in {"start", "resume"} and pilot.status in {
         PilotStatus.DRAFT,
         PilotStatus.PAUSED,
         PilotStatus.QUEUED,
@@ -889,9 +934,9 @@ async def control_pilot(
         for item in pending:
             item.status = "cancelled"
             if item.classification_run_id:
-                run = await db.get(ClassificationRun, item.classification_run_id)
-                if run:
-                    run.cancel_requested = True
+                pending_run = await db.get(ClassificationRun, item.classification_run_id)
+                if pending_run:
+                    pending_run.cancel_requested = True
         await db.commit()
     else:
         raise HTTPException(status.HTTP_409_CONFLICT, "Invalid pilot state transition")
