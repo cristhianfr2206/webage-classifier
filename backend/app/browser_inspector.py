@@ -1,7 +1,7 @@
 import asyncio
 import importlib.metadata
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -76,6 +76,24 @@ class BrowserInspector:
         termination_code: str | None = None
         main_frame_navigations = 0
         stop_task: asyncio.Task[None] | None = None
+        callback_tasks: set[asyncio.Task[Any]] = set()
+        closing = False
+        popup_handler: Any = None
+        download_handler: Any = None
+        dialog_handler: Any = None
+
+        def consume_callback(task: asyncio.Task[Any]) -> None:
+            callback_tasks.discard(task)
+            with suppress(BaseException):
+                task.result()
+
+        def schedule_callback(coro: Coroutine[Any, Any, Any]) -> None:
+            if closing:
+                coro.close()
+                return
+            task = asyncio.create_task(coro)
+            callback_tasks.add(task)
+            task.add_done_callback(consume_callback)
 
         def stop_with(code: str) -> None:
             nonlocal stop_task, termination_code
@@ -85,10 +103,13 @@ class BrowserInspector:
 
         async def route_request(route: Any, request: Any) -> None:
             nonlocal blocked_requests, main_frame_navigations, request_count, termination_code
+            if closing:
+                return
             request_count += 1
             if request_count > self.settings.browser_max_requests:
                 blocked_requests += 1
-                await route.abort("blockedbyclient")
+                with suppress(BaseException):
+                    await route.abort("blockedbyclient")
                 return
             if (
                 page is not None
@@ -98,15 +119,18 @@ class BrowserInspector:
                 main_frame_navigations += 1
                 if main_frame_navigations - 1 > self.settings.browser_max_redirects:
                     termination_code = "redirect_limit"
-                    await route.abort("blockedbyclient")
+                    with suppress(BaseException):
+                        await route.abort("blockedbyclient")
                     return
             try:
                 await self.url_validator(request.url, self.resolver)
             except BrowserPolicyError:
                 blocked_requests += 1
-                await route.abort("blockedbyclient")
+                with suppress(BaseException):
+                    await route.abort("blockedbyclient")
                 return
-            await route.continue_()
+            with suppress(BaseException):
+                await route.continue_()
 
         async def stop_page() -> None:
             if page is not None and not page.is_closed():
@@ -135,22 +159,26 @@ class BrowserInspector:
         async def reject_popup(popup: Any) -> None:
             nonlocal blocked_requests
             blocked_requests += 1
-            await popup.close()
+            with suppress(BaseException):
+                await popup.close()
 
         async def reject_download(download: Any) -> None:
             nonlocal blocked_requests
             blocked_requests += 1
-            await download.cancel()
+            with suppress(BaseException):
+                await download.cancel()
 
         async def reject_websocket(websocket: Any) -> None:
             nonlocal blocked_requests
             blocked_requests += 1
-            await websocket.close()
+            with suppress(BaseException):
+                await websocket.close()
 
         async def reject_dialog(dialog: Any) -> None:
             nonlocal blocked_requests
             blocked_requests += 1
-            await dialog.dismiss()
+            with suppress(BaseException):
+                await dialog.dismiss()
 
         def navigation(_: Any) -> None:
             nonlocal redirects, termination_code
@@ -191,10 +219,23 @@ class BrowserInspector:
                 await cdp.send("Network.enable")
                 cdp.on("Network.requestWillBeSent", account_request)
                 cdp.on("Network.dataReceived", account_data_received)
-                context.on("page", reject_popup)
-                page.on("popup", reject_popup)
-                page.on("download", reject_download)
-                page.on("dialog", reject_dialog)
+
+                # Playwright otherwise schedules coroutine listeners itself;
+                # those tasks can outlive a page that timed out. Track them
+                # explicitly and consume their close/cancellation errors.
+                def popup_handler(value: Any) -> None:
+                    schedule_callback(reject_popup(value))
+
+                def download_handler(value: Any) -> None:
+                    schedule_callback(reject_download(value))
+
+                def dialog_handler(value: Any) -> None:
+                    schedule_callback(reject_dialog(value))
+
+                context.on("page", popup_handler)
+                page.on("popup", popup_handler)
+                page.on("download", download_handler)
+                page.on("dialog", dialog_handler)
                 page.on("response", account_response)
 
                 page.on("framenavigated", navigation)
@@ -278,49 +319,66 @@ class BrowserInspector:
                 raise BrowserInspectionError(termination_code) from exc
             raise BrowserInspectionError("browser_failed") from exc
         finally:
-            if stop_task is not None:
-                with suppress(Exception):
-                    async with asyncio.timeout(2):
-                        await stop_task
+            closing = True
             # Stop producing callbacks before tearing down their Playwright
             # targets. Closing the browser first causes pending page/context
             # handlers to cascade TargetClosedError exceptions after a limit
             # or timeout has already terminated the inspection.
             if cdp is not None:
-                with suppress(Exception):
+                with suppress(BaseException):
                     cdp.remove_listener("Network.requestWillBeSent", account_request)
                     cdp.remove_listener("Network.dataReceived", account_data_received)
             if page is not None:
-                with suppress(Exception):
-                    page.remove_listener("popup", reject_popup)
-                    page.remove_listener("download", reject_download)
-                    page.remove_listener("dialog", reject_dialog)
+                with suppress(BaseException):
+                    if popup_handler is not None:
+                        page.remove_listener("popup", popup_handler)
+                    if download_handler is not None:
+                        page.remove_listener("download", download_handler)
+                    if dialog_handler is not None:
+                        page.remove_listener("dialog", dialog_handler)
                     page.remove_listener("response", account_response)
                     page.remove_listener("framenavigated", navigation)
             if context is not None:
-                with suppress(Exception):
-                    context.remove_listener("page", reject_popup)
+                with suppress(BaseException):
+                    if popup_handler is not None:
+                        context.remove_listener("page", popup_handler)
             if context is not None:
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await context.unroute_all(behavior="ignoreErrors")
+            if callback_tasks:
+                pending = tuple(callback_tasks)
+                with suppress(BaseException):
+                    async with asyncio.timeout(1):
+                        await asyncio.gather(*pending, return_exceptions=True)
+                for task in tuple(callback_tasks):
+                    task.cancel()
+                with suppress(BaseException):
+                    await asyncio.gather(*tuple(callback_tasks), return_exceptions=True)
             if cdp is not None:
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await cdp.detach()
+            # A limit callback may already have scheduled page.close().  Detach
+            # the CDP session before awaiting that close so it cannot race a
+            # second detach and leave an unhandled protocol future behind.
+            if stop_task is not None:
+                with suppress(BaseException):
+                    async with asyncio.timeout(2):
+                        await stop_task
             if page is not None and not page.is_closed():
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await page.close()
             if context is not None:
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await context.close()
             if browser is not None and browser.is_connected():
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await browser.close()
             if playwright is not None:
-                with suppress(Exception):
+                with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await playwright.stop()
