@@ -74,6 +74,7 @@ class BrowserInspector:
         cdp: Any = None
         playwright: Any = None
         termination_code: str | None = None
+        termination_event = asyncio.Event()
         main_frame_navigations = 0
         stop_task: asyncio.Task[None] | None = None
         callback_tasks: set[asyncio.Task[Any]] = set()
@@ -99,7 +100,12 @@ class BrowserInspector:
             nonlocal stop_task, termination_code
             if termination_code is None:
                 termination_code = code
-                stop_task = asyncio.create_task(stop_page())
+                termination_event.set()
+                # Closing a page from a CDP listener closes its CDP target
+                # before teardown can detach it.  Stop loading instead; the
+                # orderly teardown below closes the target after detaching.
+                stop_task = asyncio.create_task(stop_loading())
+                stop_task.add_done_callback(consume_callback)
 
         async def route_request(route: Any, request: Any) -> None:
             nonlocal blocked_requests, main_frame_navigations, request_count, termination_code
@@ -132,9 +138,10 @@ class BrowserInspector:
             with suppress(BaseException):
                 await route.continue_()
 
-        async def stop_page() -> None:
-            if page is not None and not page.is_closed():
-                await page.close()
+        async def stop_loading() -> None:
+            if cdp is not None:
+                with suppress(BaseException):
+                    await cdp.send("Page.stopLoading")
 
         def account_request(event: dict[str, Any]) -> None:
             nonlocal main_frame_navigations
@@ -239,18 +246,38 @@ class BrowserInspector:
                 page.on("response", account_response)
 
                 page.on("framenavigated", navigation)
-                try:
-                    await asyncio.wait_for(
-                        page.goto(
-                            target,
-                            wait_until="domcontentloaded",
-                            timeout=self.settings.browser_navigation_timeout_seconds * 1000,
-                        ),
-                        timeout=self.settings.browser_navigation_timeout_seconds + 2,
+                goto_task = asyncio.create_task(
+                    page.goto(
+                        target,
+                        wait_until="domcontentloaded",
+                        timeout=self.settings.browser_navigation_timeout_seconds * 1000,
                     )
-                except (TimeoutError, PlaywrightTimeoutError) as exc:
+                )
+                termination_task = asyncio.create_task(termination_event.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {goto_task, termination_task},
+                        timeout=self.settings.browser_navigation_timeout_seconds + 2,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if termination_task in done:
+                        if not goto_task.done():
+                            goto_task.cancel()
+                        await asyncio.gather(goto_task, return_exceptions=True)
+                        raise BrowserInspectionError(termination_code or "browser_failed")
+                    if goto_task in done:
+                        await goto_task
+                    else:
+                        goto_task.cancel()
+                        await asyncio.gather(goto_task, return_exceptions=True)
+                        termination_code = "navigation_timeout"
+                        raise BrowserInspectionError("navigation_timeout")
+                except PlaywrightTimeoutError as exc:
                     termination_code = "navigation_timeout"
                     raise BrowserInspectionError("navigation_timeout") from exc
+                finally:
+                    termination_task.cancel()
+                    await asyncio.gather(termination_task, return_exceptions=True)
                 if redirects - 1 > self.settings.browser_max_redirects:
                     raise BrowserInspectionError("redirect_limit")
                 if request_count > self.settings.browser_max_requests:
@@ -359,9 +386,9 @@ class BrowserInspector:
                 with suppress(BaseException):
                     async with asyncio.timeout(2):
                         await cdp.detach()
-            # A limit callback may already have scheduled page.close().  Detach
-            # the CDP session before awaiting that close so it cannot race a
-            # second detach and leave an unhandled protocol future behind.
+            # A limit callback may have scheduled ``Page.stopLoading``. Drain
+            # it before detaching, then close the page only after the CDP
+            # session is detached.
             if stop_task is not None:
                 with suppress(BaseException):
                     async with asyncio.timeout(2):

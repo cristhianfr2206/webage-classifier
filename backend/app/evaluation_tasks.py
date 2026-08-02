@@ -31,7 +31,22 @@ def _run(coro: Awaitable[object]) -> object:
         finally:
             await engine.dispose()
 
-    return asyncio.run(runner())
+    # ``asyncio.run`` invokes ``shutdown_default_executor`` when it closes a
+    # loop.  That helper starts a thread even when these database-only tasks
+    # have never used the default executor.  In a long-lived Celery child,
+    # repeated maintenance work can consequently exhaust its PID/thread
+    # cgroup during teardown.  This path owns no executor work, so close an
+    # explicit loop after disposing the async engine on that same loop.
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(runner())
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 @evaluation_celery_app.task(bind=True, name="app.evaluation_tasks.run_evaluation", acks_late=True)
