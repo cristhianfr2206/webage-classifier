@@ -1,6 +1,6 @@
 # Multidimensional taxonomy model
 
-Phases 1 and 2 introduce storage and a legacy-history projection only. They do not alter classification, feeds,
+Phases 1 through 3 introduce storage and historical projections only. They do not alter classification, feeds,
 infrastructure handling, browser handling, AI, APIs, pilots, seeded categories,
 or age-policy behavior.
 
@@ -30,6 +30,12 @@ continue to be authoritative for current production behavior.
 Phase 2 publishes `initial-legacy-v1` with only `education-reference`,
 `entertainment-streaming`, and `social-networking`. It projects completed legacy
 classification runs into assessments without changing or deleting legacy rows.
+
+Phase 3 publishes `initial-scope-v2`, a successor to the legacy snapshot. It
+preserves those content labels and adds only scope labels already emitted by
+completed safe infrastructure exclusions. Infrastructure assessments have the
+`non-consumer-infrastructure` disposition, no primary content label, and no
+age-policy decision.
 
 ## Assessment invariants
 

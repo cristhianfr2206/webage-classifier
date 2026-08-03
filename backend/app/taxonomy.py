@@ -57,10 +57,20 @@ class AssessmentLabelSource(str, enum.Enum):
 
 
 INITIAL_LEGACY_TAXONOMY_VERSION = "initial-legacy-v1"
+INITIAL_SCOPE_TAXONOMY_VERSION = "initial-scope-v2"
 LEGACY_CATEGORY_LABEL_SLUGS: dict[str, str] = {
     "education": "education-reference",
     "entertainment": "entertainment-streaming",
     "social": "social-networking",
+}
+INFRASTRUCTURE_SCOPE_LABEL_SLUGS: dict[str, str] = {
+    "analytics_advertising": "analytics-advertising",
+    "cdn_delivery": "cdn-delivery",
+    "cloud_hosting": "cloud-hosting",
+    "dns_nameserver": "dns-nameserver",
+    "software_update": "software-update",
+    "static_asset_host": "static-asset-host",
+    "time_service": "time-service",
 }
 
 
