@@ -1,21 +1,47 @@
+from __future__ import annotations
+
 import enum
 import uuid
 from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
+    inspect,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+)
+from sqlalchemy.orm import (
+    Session as SyncSession,
+)
 from sqlalchemy.types import JSON
+
+from app.taxonomy import (
+    AssessmentDisposition,
+    AssessmentLabelRole,
+    AssessmentLabelSource,
+    TaxonomyDimension,
+    TaxonomyInvariantError,
+    TaxonomyLabelStatus,
+    TaxonomyVersionStatus,
+    validate_label_assignment,
+)
 
 
 class Base(DeclarativeBase):
@@ -410,6 +436,234 @@ class ClassifierVersion(Base):
     activated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaxonomyVersion(Base):
+    """An immutable published taxonomy snapshot."""
+
+    __tablename__ = "taxonomy_versions"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version: Mapped[str] = mapped_column(String(80), unique=True)
+    status: Mapped[TaxonomyVersionStatus] = mapped_column(
+        Enum(TaxonomyVersionStatus, name="taxonomy_version_status"),
+        default=TaxonomyVersionStatus.DRAFT,
+        index=True,
+    )
+    checksum: Mapped[str] = mapped_column(String(64), unique=True)
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    change_notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parent_version: Mapped[TaxonomyVersion | None] = relationship(remote_side=[id])
+
+
+class TaxonomyLabel(Base):
+    __tablename__ = "taxonomy_labels"
+    __table_args__ = (
+        UniqueConstraint("taxonomy_version_id", "slug", name="uq_taxonomy_label_version_slug"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    taxonomy_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="CASCADE"), index=True
+    )
+    dimension: Mapped[TaxonomyDimension] = mapped_column(
+        Enum(TaxonomyDimension, name="taxonomy_dimension"), index=True
+    )
+    slug: Mapped[str] = mapped_column(String(80))
+    display_name: Mapped[str] = mapped_column(String(120))
+    definition: Mapped[str] = mapped_column(String(2000), default="")
+    status: Mapped[TaxonomyLabelStatus] = mapped_column(
+        Enum(TaxonomyLabelStatus, name="taxonomy_label_status"),
+        default=TaxonomyLabelStatus.ACTIVE,
+        index=True,
+    )
+    default_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    default_block_recommended: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    taxonomy_version: Mapped[TaxonomyVersion] = relationship()
+
+
+class ClassificationAssessment(Base):
+    """A future normalized projection of one classification run.
+
+    Phase 1 intentionally does not populate this table or alter legacy
+    ``WebsiteClassification`` records.
+    """
+
+    __tablename__ = "classification_assessments"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    website_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("websites.id", ondelete="CASCADE"), index=True
+    )
+    taxonomy_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    terminal_disposition: Mapped[AssessmentDisposition] = mapped_column(
+        Enum(AssessmentDisposition, name="assessment_disposition"),
+        default=AssessmentDisposition.UNRESOLVED,
+        index=True,
+    )
+    primary_content_label_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("taxonomy_labels.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    taxonomy_version: Mapped[TaxonomyVersion] = relationship()
+    primary_content_label: Mapped[TaxonomyLabel | None] = relationship(
+        foreign_keys=[primary_content_label_id]
+    )
+
+
+class ClassificationAssessmentLabel(Base):
+    __tablename__ = "classification_assessment_labels"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "label_id", name="uq_assessment_label"),
+        CheckConstraint("confidence BETWEEN 0 AND 100", name="ck_assessment_label_confidence"),
+        Index(
+            "uq_assessment_primary_content_label",
+            "assessment_id",
+            unique=True,
+            postgresql_where=text("role = 'PRIMARY'"),
+            sqlite_where=text("role = 'PRIMARY'"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classification_assessments.id", ondelete="CASCADE"), index=True
+    )
+    label_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_labels.id", ondelete="RESTRICT")
+    )
+    dimension: Mapped[TaxonomyDimension] = mapped_column(
+        Enum(TaxonomyDimension, name="taxonomy_dimension")
+    )
+    role: Mapped[AssessmentLabelRole] = mapped_column(
+        Enum(AssessmentLabelRole, name="assessment_label_role"),
+        default=AssessmentLabelRole.EVIDENCE,
+    )
+    confidence: Mapped[int] = mapped_column(Integer)
+    source: Mapped[AssessmentLabelSource] = mapped_column(
+        Enum(AssessmentLabelSource, name="assessment_label_source")
+    )
+    evidence: Mapped[str] = mapped_column(String(2000), default="")
+    provenance: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    assessment: Mapped[ClassificationAssessment] = relationship()
+    label: Mapped[TaxonomyLabel] = relationship()
+
+
+class AssessmentPolicyDecision(Base):
+    __tablename__ = "assessment_policy_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "minimum_age IS NULL OR minimum_age BETWEEN 0 AND 120",
+            name="ck_assessment_policy_minimum_age",
+        ),
+        CheckConstraint(
+            "maximum_age IS NULL OR maximum_age BETWEEN 0 AND 120",
+            name="ck_assessment_policy_maximum_age",
+        ),
+        CheckConstraint(
+            "minimum_age IS NULL OR maximum_age IS NULL OR minimum_age <= maximum_age",
+            name="ck_assessment_policy_age_range",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classification_assessments.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    minimum_age: Mapped[int | None] = mapped_column(Integer)
+    maximum_age: Mapped[int | None] = mapped_column(Integer)
+    rating: Mapped[str | None] = mapped_column(String(40))
+    review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    block_recommended: Mapped[bool] = mapped_column(Boolean, default=False)
+    policy_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("policy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    reasons: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    assessment: Mapped[ClassificationAssessment] = relationship()
+
+
+def _taxonomy_version_for_label(
+    session: SyncSession, label: TaxonomyLabel
+) -> TaxonomyVersion | None:
+    if label.taxonomy_version is not None:
+        return label.taxonomy_version
+    return session.get(TaxonomyVersion, label.taxonomy_version_id)
+
+
+@event.listens_for(SyncSession, "before_flush")
+def enforce_taxonomy_orm_invariants(
+    session: SyncSession, _flush_context: object, _instances: object
+) -> None:
+    """Mirror the PostgreSQL triggers for model-level and SQLite test safety."""
+
+    for version in session.deleted:
+        if (
+            isinstance(version, TaxonomyVersion)
+            and version.status is TaxonomyVersionStatus.PUBLISHED
+        ):
+            raise TaxonomyInvariantError("published_taxonomy_version_is_immutable")
+
+    for version in session.dirty:
+        if not isinstance(version, TaxonomyVersion):
+            continue
+        status_history = inspect(version).attrs.status.history
+        if (
+            TaxonomyVersionStatus.PUBLISHED in status_history.deleted
+            or TaxonomyVersionStatus.PUBLISHED in status_history.unchanged
+        ):
+            raise TaxonomyInvariantError("published_taxonomy_version_is_immutable")
+
+    for label in (*session.new, *session.dirty, *session.deleted):
+        if not isinstance(label, TaxonomyLabel):
+            continue
+        taxonomy_version = _taxonomy_version_for_label(session, label)
+        if (
+            taxonomy_version is not None
+            and taxonomy_version.status is TaxonomyVersionStatus.PUBLISHED
+        ):
+            raise TaxonomyInvariantError("published_taxonomy_labels_are_immutable")
+
+    for assessment in (*session.new, *session.dirty):
+        if not isinstance(assessment, ClassificationAssessment):
+            continue
+        primary_label = assessment.primary_content_label
+        if primary_label is None and assessment.primary_content_label_id is not None:
+            primary_label = session.get(TaxonomyLabel, assessment.primary_content_label_id)
+        if primary_label is None:
+            continue
+        if primary_label.dimension is not TaxonomyDimension.CONTENT:
+            raise TaxonomyInvariantError("assessment_primary_label_must_be_content")
+        if primary_label.taxonomy_version_id != assessment.taxonomy_version_id:
+            raise TaxonomyInvariantError("assessment_primary_label_taxonomy_mismatch")
+
+    for association in (*session.new, *session.dirty):
+        if not isinstance(association, ClassificationAssessmentLabel):
+            continue
+        label = association.label
+        if label is None:
+            label = session.get(TaxonomyLabel, association.label_id)
+        if label is None:
+            continue
+        validate_label_assignment(
+            label_dimension=label.dimension,
+            assignment_dimension=association.dimension,
+            role=association.role,
+        )
+        assessment = association.assessment
+        if assessment is None:
+            assessment = session.get(ClassificationAssessment, association.assessment_id)
+        if assessment is not None and label.taxonomy_version_id != assessment.taxonomy_version_id:
+            raise TaxonomyInvariantError("assessment_label_taxonomy_mismatch")
 
 
 class EvaluationDataset(Base):

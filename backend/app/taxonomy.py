@@ -1,0 +1,73 @@
+"""Taxonomy storage types and invariant helpers.
+
+This module deliberately contains no classification, feed, or policy-selection
+logic. Phase 1 only defines the storage contract for a later taxonomy rollout.
+"""
+
+from __future__ import annotations
+
+import enum
+
+
+class TaxonomyVersionStatus(str, enum.Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    RETIRED = "retired"
+
+
+class TaxonomyLabelStatus(str, enum.Enum):
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+
+
+class TaxonomyDimension(str, enum.Enum):
+    CONTENT = "content"
+    SECURITY = "security"
+    SCOPE = "scope"
+
+
+class AssessmentDisposition(str, enum.Enum):
+    UNRESOLVED = "unresolved"
+    CLASSIFIED = "classified"
+    UNCATEGORIZED = "uncategorized"
+    NON_CONSUMER_INFRASTRUCTURE = "non_consumer_infrastructure"
+    UNREACHABLE = "unreachable"
+    SAFETY_REJECTED = "safety_rejected"
+    REVIEW_REQUIRED = "review_required"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class AssessmentLabelRole(str, enum.Enum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+    EVIDENCE = "evidence"
+
+
+class AssessmentLabelSource(str, enum.Enum):
+    RULES = "rules"
+    STATIC = "static"
+    RENDERED = "rendered"
+    SCREENSHOT = "screenshot"
+    UT1 = "ut1"
+    INFRASTRUCTURE = "infrastructure"
+    AI = "ai"
+    MANUAL = "manual"
+
+
+class TaxonomyInvariantError(ValueError):
+    """Raised before persistence when a taxonomy invariant is violated."""
+
+
+def validate_label_assignment(
+    *,
+    label_dimension: TaxonomyDimension,
+    assignment_dimension: TaxonomyDimension,
+    role: AssessmentLabelRole,
+) -> None:
+    """Validate the dimension and role stored with an assessment-label link."""
+
+    if assignment_dimension is not label_dimension:
+        raise TaxonomyInvariantError("assessment_label_dimension_mismatch")
+    if role is AssessmentLabelRole.PRIMARY and label_dimension is not TaxonomyDimension.CONTENT:
+        raise TaxonomyInvariantError("primary_label_must_be_content")

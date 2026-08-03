@@ -1,0 +1,546 @@
+Website Classification Architecture and Taxonomy Design Review
+===============================================================
+
+No files or records were modified as part of the review.
+
+1. CURRENT STATE
+----------------
+
+The application currently has one category dimension with three seeded categories:
+
+- education — Education — Children policy
+- entertainment — Entertainment — Teen policy
+- social — Social — Teen policy
+
+This single category currently carries semantic classification, age-policy selection,
+reporting, and some review behavior.
+
+Relevant current behavior:
+
+- WebsiteClassification has one required category and age policy per row.
+- ClassificationRun represents processing lifecycle: pending, running, completed,
+  failed, and cancelled.
+- Infrastructure safe-exclusions are controlled non-consumer run results with no
+  consumer classification or age policy.
+- UT1 is conservative: education can short-circuit; social and audio/video are
+  evidence-only; adult and gambling are high-risk/manual-review evidence.
+- AI output is restricted to database categories and cannot set age policy.
+- Current rules fall back toward education. This should eventually become an
+  explicit uncategorized/manual-review outcome, not a semantic classification.
+
+2. RECOMMENDED MULTIDIMENSIONAL MODEL
+-------------------------------------
+
+Keep processing status, content, service scope, security reputation, and policy
+decisions separate.
+
+ClassificationRun
+  └─ ClassificationAssessment
+       ├─ primary content label
+       ├─ secondary content labels
+       ├─ scope/service labels
+       ├─ security/reputation labels
+       ├─ terminal disposition
+       ├─ evidence/provenance
+       └─ policy decision snapshot
+
+Recommended entities:
+
+- taxonomy_versions: immutable, checksum-protected published taxonomy snapshots.
+- taxonomy_labels: versioned labels with dimension, slug, display name,
+  definition, status, and defaults.
+- classification_assessments: one normalized assessment per run/website, with
+  terminal disposition and primary content label.
+- classification_assessment_labels: multi-label associations with dimension,
+  confidence, source, role, and bounded evidence.
+- assessment_policy_decisions: derived policy snapshot containing age/rating,
+  blocked/review-required, policy version, and reasons.
+- feed_label_mappings: versioned mappings from UT1/feed labels to taxonomy labels
+  and handling mode.
+
+Dimensions:
+
+- Content: what the website substantively provides. One primary label and zero or
+  more secondary labels.
+- Security: malware, phishing, fraud, or other threat signals. May coexist with
+  content.
+- Scope/service type: CDN, DNS, cloud hosting, messaging, proxy, infrastructure,
+  and similar roles. Never implies a consumer category.
+- Age-policy recommendation: derived from confirmed content labels and
+  administrator policy; never supplied by UT1 or AI directly.
+- Terminal disposition: classified, uncategorized, non-consumer infrastructure,
+  unreachable, safety-blocked, review-required, failed, or cancelled.
+
+3. COMPLETE TAXONOMY MAPPING
+----------------------------
+
+Adult Content
+- Slug: adult-content
+- Dimension: content-risk
+- Final classification: yes, with strong evidence
+- Age policy: adult
+- Review/block: review required; blocking is policy-controlled
+- UT1/evidence: UT1 adult is high-risk evidence only initially
+
+Business & Economy
+- Slug: business-economy
+- Dimension: content
+- Final classification: yes
+- Age policy: general/none by default
+- Review/block: no default block
+- Evidence: rules, page text, business signals
+
+Careers & Employment
+- Slug: careers-employment
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: jobs, recruitment, career portals
+
+Communication & Messaging
+- Slug: communication-messaging
+- Dimension: scope/service
+- Final classification: no consumer primary by itself
+- Age policy: none
+- Review/block: review only when threat signals exist
+- Evidence: messaging service behavior; may coexist with content
+
+Content Delivery Networks
+- Slug: content-delivery-network
+- Dimension: scope/service
+- Final classification: no
+- Age policy: none
+- Review/block: no block by itself
+- Evidence: exact safe-exclude rules only for known machine endpoints
+
+Drugs & Controlled Substances
+- Slug: drugs-controlled-substances
+- Dimension: content-risk
+- Final classification: yes, when substantive content is confirmed
+- Age policy: adult/jurisdictional
+- Review/block: review required; restrictive policy may block
+- Evidence: never infer from keywords alone
+
+Education & Reference
+- Slug: education-reference
+- Dimension: content
+- Final classification: yes
+- Age policy: legacy mapping is Children; future default should be policy-driven
+- Review/block: no default block
+- UT1/evidence: UT1 education is the only current short-circuit candidate
+
+Entertainment & Streaming
+- Slug: entertainment-streaming
+- Dimension: content
+- Final classification: yes
+- Age policy: teen default
+- Review/block: no default block
+- UT1/evidence: UT1 audio-video is supporting evidence only
+
+Finance & Banking
+- Slug: finance-banking
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: review when fraud/security signals conflict
+- Evidence: may coexist with phishing-fraud
+
+Food & Dining
+- Slug: food-dining
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: restaurants, recipes, ordering
+
+Gambling
+- Slug: gambling
+- Dimension: content-risk
+- Final classification: yes, when confirmed
+- Age policy: adult
+- Review/block: review required; block recommendation may be policy-controlled
+- UT1/evidence: UT1 gambling is high-risk/manual-review evidence
+
+Gaming
+- Slug: gaming
+- Dimension: content
+- Final classification: yes
+- Age policy: teen default
+- Review/block: review if gambling/adult content coexists
+- UT1/evidence: UT1 games is evidence only initially
+
+Government & Legal
+- Slug: government-legal
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: official government and legal resources
+
+Health & Fitness
+- Slug: health-fitness
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: review for medical claims or harmful content
+- Evidence: do not imply clinical trustworthiness
+
+Illegal Content & Piracy
+- Slug: illegal-content-piracy
+- Dimension: content-risk
+- Final classification: yes, with confirmed evidence
+- Age policy: no ordinary age recommendation
+- Review/block: review required; block recommended
+- Evidence: high false-positive risk; require strong evidence
+
+Malware & Threats
+- Slug: malware-threats
+- Dimension: security
+- Final classification: never a content primary
+- Age policy: none
+- Review/block: block recommended; mandatory review/audit
+- Evidence: must coexist with known content/scope where available
+
+News & Media
+- Slug: news-media
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: publishers, journalism, media
+
+Phishing & Fraud
+- Slug: phishing-fraud
+- Dimension: security
+- Final classification: never a content primary
+- Age policy: none
+- Review/block: block recommended; mandatory review/audit
+- Evidence: may coexist with finance, shopping, or social
+
+Proxies & Anonymizers
+- Slug: proxies-anonymizers
+- Dimension: scope/service-risk
+- Final classification: not a normal content primary
+- Age policy: none
+- Review/block: review; organization policy may block
+- Evidence: never infer from a generic hosting provider
+
+Real Estate
+- Slug: real-estate
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: listings and property services
+
+Science & Research
+- Slug: science-research
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: research institutions and journals
+
+Search Engines & Portals
+- Slug: search-portals
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: search/portal behavior must be evidenced
+
+Shopping & E-Commerce
+- Slug: shopping-ecommerce
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: review if fraud signals exist
+- UT1/evidence: UT1 shopping is evidence only initially
+
+Social Networking
+- Slug: social-networking
+- Dimension: content
+- Final classification: yes
+- Age policy: teen default
+- Review/block: review for adult/high-risk coexistence
+- UT1/evidence: UT1 social_networks is evidence only
+
+Sports
+- Slug: sports
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: sports publishers and services
+
+Technology & Software
+- Slug: technology-software
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: software products and developer services
+
+Travel & Hospitality
+- Slug: travel-hospitality
+- Dimension: content
+- Final classification: yes
+- Age policy: general
+- Review/block: no default block
+- Evidence: travel booking, lodging, tourism
+
+Uncategorized
+- Slug: uncategorized
+- Dimension: terminal disposition
+- Final classification: no
+- Age policy: none
+- Review/block: manual review based on confidence/policy
+- Evidence: replaces the implicit education fallback
+
+Weapons & Explosives
+- Slug: weapons-explosives
+- Dimension: content-risk
+- Final classification: yes, when confirmed
+- Age policy: adult/jurisdictional
+- Review/block: review required; restrictive policy may block
+- Evidence: requires strong content evidence
+
+Web Hosting & Cloud Services
+- Slug: web-hosting-cloud-services
+- Dimension: scope/service
+- Final classification: no consumer primary by itself
+- Age policy: none
+- Review/block: no default block
+- Evidence: exact infrastructure endpoints may be excluded; provider marketing
+  sites remain classifiable
+
+4. AGE-POLICY MATRIX
+--------------------
+
+- education-reference: preserve existing Children mapping for legacy records. Do
+  not assume all future reference material is child-directed.
+- entertainment-streaming, social-networking, gaming: Teen default.
+- adult-content, gambling, drugs-controlled-substances, weapons-explosives:
+  Adult, with manual review and jurisdiction-sensitive blocking policy.
+- illegal-content-piracy: no ordinary age recommendation; review/block policy
+  takes precedence.
+- malware-threats and phishing-fraud: no age policy; security block
+  recommendation is distinct from age suitability.
+- CDN, cloud, messaging, proxy, and non-consumer infrastructure: age policy is
+  not applicable.
+- Other ordinary content labels: General/no minimum age by default.
+- Uncategorized, failed, and unreachable: no age policy; never infer safe.
+
+5. THREAT AND BLOCKING MATRIX
+-----------------------------
+
+- malware-threats: critical threat; block recommended; review required.
+- phishing-fraud: critical threat; block recommended; review required.
+- illegal-content-piracy: high risk; block recommended after confirmation;
+  review required.
+- proxies-anonymizers: contextual risk; organization policy decides; usually
+  reviewed.
+- adult-content, gambling, drugs-controlled-substances, weapons-explosives:
+  content risks; policy decides blocking; review required.
+- Scope-only infrastructure: no threat and no block by itself.
+
+A block recommendation is not enforcement. The policy engine remains the sole
+authority for final blocked status.
+
+6. CONFLICT AND PRECEDENCE RULES
+--------------------------------
+
+1. Processing state is separate from classification. Failed, cancelled, and
+   safety-blocked runs are never silently converted to content categories.
+2. Safe non-consumer infrastructure is terminal: scope evidence may be stored,
+   but no consumer content category or age policy exists.
+3. Security labels coexist with content labels. Malware/phishing are never
+   overwritten by content, and their block/review recommendation has precedence.
+4. Select one primary content label only when evidence thresholds are met;
+   additional confirmed content labels are secondary.
+5. Scope labels cannot become consumer categories. CDN and cloud services are
+   not substitutes for technology-software.
+6. High-risk or strong-source conflicts require manual review.
+7. Manual locked decisions override automated output. AI may recommend content
+   only and cannot set policy, security disposition, or taxonomy.
+8. Uncategorized means no sufficiently reliable classification; it is never
+   safe and is never education.
+
+7. MINIMAL DATABASE CHANGES
+---------------------------
+
+Use additive changes only. Do not modify or delete current categories,
+age policies, WebsiteClassification rows, or UUIDs.
+
+Proposed migrations:
+
+- 0007_taxonomy_dimensions.py
+  Add taxonomy versions, taxonomy labels, assessments, assessment-label
+  associations, policy decision snapshots, enums, and indexes. No production
+  classification behavior changes.
+
+- 0008_taxonomy_legacy_backfill.py
+  After approval, seed a published taxonomy version and project legacy education,
+  entertainment, and social records into assessments.
+
+- Later migration
+  Add versioned feed mappings and evaluator v2 fields only when the feed/category
+  rollout begins.
+
+Key constraints:
+
+- taxonomy_version_id + slug is unique.
+- assessment_id + label_id is unique.
+- At most one primary content label exists per assessment.
+- Scope/security labels cannot be primary content.
+- Policy decision is nullable for scope-only, infrastructure, unknown, failed,
+  and cancelled outcomes.
+- Published taxonomy versions are immutable; corrections create a successor with
+  lineage and checksum.
+
+8. API CHANGES
+--------------
+
+Use additive v2 fields and preserve all existing response fields.
+
+Add an optional assessment object to website/classification responses:
+
+- primary_content
+- secondary_content
+- security_labels
+- scope_labels
+- terminal_status
+- policy_decision
+- taxonomy_version
+- bounded evidence provenance
+
+Retain category_id, category history, and age-policy response fields throughout
+the compatibility period.
+
+Future administrative operations should publish taxonomy versions and mappings
+through audited operations, not arbitrary live category mutation. Future manual
+review may accept dimensioned labels and a policy decision while retaining the
+current single-category override as a compatibility path.
+
+9. FRONTEND CHANGES
+-------------------
+
+No initial redesign is needed. Later, add distinct text-rendered badge groups:
+
+- Content
+- Security
+- Scope/service type
+- Age-policy decision
+- Processing outcome
+
+Keep the existing category list as a legacy view until a taxonomy-version UI is
+ready. Show infrastructure as Non-consumer infrastructure, not as a consumer
+category. Render label names and evidence as inert text.
+
+10. CLASSIFIER, FEED, BROWSER, AND AI FIT
+-----------------------------------------
+
+- classification_service.py: produce separate content, scope, and security
+  conclusions; eventually remove the education fallback.
+- Rules: version weights by taxonomy version and dimension. Never produce threat
+  or blocking labels from weak keywords alone.
+- UT1: use versioned mappings. Education may be final; social/audio-video are
+  evidence-only; shopping/games unsupported evidence; adult/gambling high-risk
+  review evidence.
+- Infrastructure detector: retain exact-domain-only safe exclusions. Emit scope
+  and terminal non-consumer disposition, rather than a consumer category.
+- HTTP/browser: feed bounded evidence into the same assessment with source
+  provenance. Browser cannot bypass policy checks.
+- AI: recommend active content labels only. It must not create security blocks,
+  scope exclusions, policies, or categories.
+
+11. MIGRATION AND BACKWARD COMPATIBILITY
+----------------------------------------
+
+- Preserve all current categories, policies, WebsiteClassification rows, and IDs.
+- Legacy mappings:
+  education -> education-reference
+  entertainment -> entertainment-streaming
+  social -> social-networking
+- Continue serving legacy API fields from the existing projection during the
+  transition.
+- Do not retroactively infer security/scope labels unless existing evidence
+  proves them.
+- Existing immutable evaluation datasets remain valid under a recorded legacy
+  taxonomy version. New evaluations use a new version.
+
+12. EVALUATION PLAN USING EXISTING PILOT DATA
+---------------------------------------------
+
+Use completed 100-domain pilots only as offline evidence; do not reprocess public
+domains.
+
+1. Create a derived immutable evaluation dataset from existing runs and manual
+   review.
+2. Label outcomes as consumer content, confirmed non-consumer infrastructure,
+   controlled limit/unreachable, safety rejection, or ambiguous/manual review.
+3. Measure primary/secondary content accuracy, scope precision, security false
+   negatives, policy accuracy, false exclusions, source usage, and cost/time.
+4. Require human adjudication before using disagreements as ground truth.
+5. Compare taxonomy versions rather than mixing metrics across them.
+
+13. CONSERVATIVE ROLLOUT
+------------------------
+
+Phase 1: Data model only. Add additive taxonomy/version/assessment structures
+without pipeline changes.
+
+Phase 2: Publish initial taxonomy and backfill only the three legacy categories.
+
+Phase 3: Move existing exact infrastructure outcomes into the scope/disposition
+model without adding detector rules.
+
+Phase 4: Add a small set of high-confidence content labels with deterministic
+rules and evaluation fixtures.
+
+Phase 5: Roll out versioned UT1 feed mappings while retaining current
+conservative behavior.
+
+Phase 6: Extend manual review and AI recommendations to dimensioned content
+labels. AI remains policy-blind.
+
+Phase 7: Calibration, pilot replay, independent category/policy metrics, and
+carefully gated wider rollout.
+
+14. RISKS AND FALSE-POSITIVE AREAS
+----------------------------------
+
+- Education/reference is broader than child-directed education; blanket Children
+  policy can over-restrict or under-restrict.
+- Adult, gambling, drugs, weapons, piracy, and proxy signals vary by jurisdiction
+  and context; weak text/feed evidence must not auto-block.
+- Finance and shopping can share terms with fraud.
+- Cloud/CDN/hosting/messaging providers serve both machine endpoints and
+  consumer-facing content; only exact high-confidence endpoints should exclude.
+- UT1 data can be stale, broad, or unsuitable as sole authority.
+- Browser availability and bot mitigation can bias results toward failures.
+- AI can hallucinate or be prompt-injected; it should stay bounded, validated,
+  content-only, and non-authoritative for policy.
+- Taxonomy changes can invalidate comparisons unless every assessment, ruleset,
+  feed mapping, and policy decision records its version.
+
+15. SAFEST MINIMAL FIRST IMPLEMENTATION PHASE
+---------------------------------------------
+
+Phase 1 should add only the versioned multidimensional storage model and its
+invariants. It should not change the classification pipeline, current category
+behavior, feeds, browser behavior, AI behavior, pilot selection, or existing API
+responses.
+
+Estimated Phase 1 touch points:
+
+- backend/alembic/versions/0007_taxonomy_dimensions.py
+- backend/app/models.py
+- backend/app/taxonomy.py
+- backend/tests/test_taxonomy_models.py
+- backend/tests/test_taxonomy_versioning.py
+- docs/taxonomy-model.md
+
+No frontend, router, classifier, browser, AI, pilot, or feed changes are required
+in Phase 1.

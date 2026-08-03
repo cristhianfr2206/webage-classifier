@@ -1,0 +1,42 @@
+# Multidimensional taxonomy model
+
+Phase 1 introduces storage only. It does not alter classification, feeds,
+infrastructure handling, browser handling, AI, APIs, pilots, seeded categories,
+or age-policy behavior.
+
+## Dimensions
+
+- **Content:** one optional primary label and zero or more secondary labels.
+- **Security:** independent labels such as phishing or malware. They cannot be a
+  primary content label.
+- **Scope:** independent service-role labels such as CDN or cloud hosting. They
+  cannot be a primary content label.
+- **Policy decision:** an optional, derived snapshot. It is absent for unresolved,
+  non-consumer, unreachable, failed, and cancelled outcomes.
+- **Terminal disposition:** records the assessment result independently from any
+  content label.
+
+## Versioning and immutability
+
+`taxonomy_versions` has a draft/published/retired lifecycle. A published version
+and its labels are immutable at the database layer. Corrections must create a new
+draft version with `parent_version_id` pointing to the corrected version, then
+publish that successor after review.
+
+No taxonomy labels are seeded in Phase 1, and no legacy classification rows are
+backfilled. Existing `categories`, `age_policies`, and `website_classifications`
+continue to be authoritative for current production behavior.
+
+## Assessment invariants
+
+- A classification run has at most one normalized assessment.
+- A taxonomy version/slug pair is unique.
+- An assessment may have at most one primary label.
+- A primary label must be a content label from the assessment taxonomy version.
+- Scope and security labels may only be secondary/evidence labels.
+- An assessment label must use the same taxonomy version as its assessment.
+- Evidence and provenance are bounded text fields; Phase 1 does not store raw
+  HTML, provider prompts, or screenshots in taxonomy tables.
+
+PostgreSQL triggers enforce persistence invariants. Matching SQLAlchemy checks
+make the same constraints available in the SQLite-backed unit-test suite.
