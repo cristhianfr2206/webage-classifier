@@ -13,6 +13,7 @@ from app.database import get_db
 from app.dependencies import current_user
 from app.main import app
 from app.models import (
+    AuditLog,
     Base,
     Category,
     ClassificationRun,
@@ -422,6 +423,91 @@ async def test_resume_existing_pending_dispatches_only_linked_pending_runs(
         assert historical_failed is not None
         assert historical_failed.status == RunStatus.FAILED
         assert historical_failed.attempts == 2
+
+
+async def test_finalize_paused_pilot_reconciles_terminal_runs_without_dispatch(
+    evaluation_db: tuple[async_sessionmaker[AsyncSession], User, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maker, admin, _ = evaluation_db
+
+    async def forbidden(_: ClassificationRun) -> None:
+        raise AssertionError("finalization must not dispatch work")
+
+    monkeypatch.setattr("app.routers.evaluation.dispatch_run", forbidden)
+    created = await request(
+        "POST",
+        "/api/pilots",
+        admin,
+        {"size": 100, "rank_start": 1, "dry_run": False, "capacity_limit": 10},
+    )
+    assert created.status_code == 201
+    pilot_id = uuid.UUID(created.json()["id"])
+
+    async with maker() as db:
+        pilot = await db.get(PilotRun, pilot_id)
+        assert pilot is not None
+        pilot.status = PilotStatus.PAUSED
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        membership_before = [[item.original_tranco_rank, str(item.website_id)] for item in items]
+        for index, item in enumerate(items):
+            run = ClassificationRun(
+                website_id=item.website_id,
+                requested_by_id=admin.id,
+                classifier_version_id=pilot.classifier_version_id,
+                queue_name=QueueName.STANDARD,
+                priority=3,
+                task_id=str(uuid.uuid4()),
+                status=RunStatus.COMPLETED if index < 55 else RunStatus.FAILED,
+            )
+            db.add(run)
+            await db.flush()
+            item.classification_run_id = run.id
+            item.status = "completed" if index < 55 else "failed"
+        await db.commit()
+
+    response = await request("POST", f"/api/pilots/{pilot_id}/finalize", admin)
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": str(pilot_id),
+        "status": PilotStatus.COMPLETED.value,
+        "dispatched": 0,
+    }
+
+    async with maker() as db:
+        pilot = await db.get(PilotRun, pilot_id)
+        assert pilot is not None
+        assert pilot.status == PilotStatus.COMPLETED
+        assert pilot.processed_count == 55
+        assert pilot.failed_count == 45
+        assert pilot.completed_at is not None
+        items = list(
+            (
+                await db.scalars(
+                    select(PilotItem)
+                    .where(PilotItem.pilot_id == pilot_id)
+                    .order_by(PilotItem.selection_order)
+                )
+            ).all()
+        )
+        membership_after = [[item.original_tranco_rank, str(item.website_id)] for item in items]
+        assert membership_after == membership_before
+        assert len([item for item in items if item.classification_run_id is not None]) == 100
+        audit = await db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action == "pilot.finalize", AuditLog.target_id == str(pilot_id))
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert audit is not None
+        assert audit.details == {"dispatched": 0, "completed": 55, "failed": 45, "unresolved": 0}
 
 
 async def test_paused_pilot_reconciles_settled_work_without_dispatch(

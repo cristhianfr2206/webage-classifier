@@ -1,8 +1,39 @@
+import pytest
+
 from app.infrastructure_detection import (
     detect_infrastructure,
     evidence_only_rules,
     rules,
     safe_exclude_rules,
+)
+
+REVIEWED_PILOT_SAFE_EXCLUDES = (
+    "trbcdn.net",
+    "cdn77.org",
+    "vedcdnlb.com",
+    "dnsowl.com",
+    "msftncsi.com",
+    "static.microsoft",
+    "steamserver.net",
+    "azurefd.net",
+    "nflxso.net",
+    "spo-msedge.net",
+    "yccdn.ru",
+    "ax-msedge.net",
+    "dns-parking.com",
+    "msftconnecttest.com",
+    "ggpht.com",
+    "tm-azurefd.net",
+    "cdn-apple.com",
+    "jomodns.com",
+    "sfx.ms",
+    "bytefcdn-oversea.com",
+    "wac-msedge.net",
+    "hichina.com",
+    "ttdns2.com",
+    "nominetdns.uk",
+    "registrar-servers.com",
+    "nic.direct",
 )
 
 
@@ -18,6 +49,17 @@ def test_high_confidence_pilot_infrastructure_is_detected_without_pipeline_integ
     assert decision.exclude_from_age_classification
 
 
+@pytest.mark.parametrize("domain", REVIEWED_PILOT_SAFE_EXCLUDES)
+def test_reviewed_pilot_infrastructure_rules_are_safe_exact_excludes(domain: str) -> None:
+    decision = detect_infrastructure(domain)
+    assert decision is not None
+    assert decision.domain == domain
+    assert decision.confidence_tier == "safe_exclude"
+    assert not decision.http_useful
+    assert not decision.browser_useful
+    assert decision.exclude_from_age_classification
+
+
 def test_consumer_and_medium_confidence_service_domains_remain_unknown() -> None:
     for domain in (
         "google.com",
@@ -27,6 +69,12 @@ def test_consumer_and_medium_confidence_service_domains_remain_unknown() -> None
         "adobe.com",
         "discord.gg",
         "gwfb.net",
+        "playstation.com",
+        "steamcommunity.com",
+        "cdn77.com",
+        "azurefd.com",
+        "sub.trbcdn.net",
+        "trbcdn.net.example",
     ):
         assert detect_infrastructure(domain) is None
 

@@ -1,9 +1,7 @@
-"""Read-only prototype for identifying obvious infrastructure hostnames.
+"""Conservative exact-domain detection for non-consumer infrastructure.
 
-This module is intentionally not imported by the classification or queue
-pipelines.  The rules are exact-domain matches only; no parent-domain
-inference is performed, which avoids classifying an entire consumer domain
-family as infrastructure.
+The rules are exact-domain matches only; no parent-domain inference is
+performed, which avoids excluding an entire consumer domain family.
 """
 
 from __future__ import annotations
@@ -48,6 +46,32 @@ _SAFE_EXCLUDE = frozenset(
         "tiktokcdn.com",
         "aaplimg.com",
         "googleusercontent.com",
+        "trbcdn.net",
+        "cdn77.org",
+        "vedcdnlb.com",
+        "dnsowl.com",
+        "msftncsi.com",
+        "static.microsoft",
+        "steamserver.net",
+        "azurefd.net",
+        "nflxso.net",
+        "spo-msedge.net",
+        "yccdn.ru",
+        "ax-msedge.net",
+        "dns-parking.com",
+        "msftconnecttest.com",
+        "ggpht.com",
+        "tm-azurefd.net",
+        "cdn-apple.com",
+        "jomodns.com",
+        "sfx.ms",
+        "bytefcdn-oversea.com",
+        "wac-msedge.net",
+        "hichina.com",
+        "ttdns2.com",
+        "nominetdns.uk",
+        "registrar-servers.com",
+        "nic.direct",
     }
 )
 
@@ -63,6 +87,14 @@ _RULES: dict[str, tuple[str, str, str]] = {
     "nic.ru": ("dns_nameserver", "high", "registry/registrar service hostname"),
     "root-servers.net": ("dns_nameserver", "high", "root nameserver hostname"),
     "ntp.org": ("time_service", "high", "network time service hostname"),
+    "dnsowl.com": ("dns_nameserver", "high", "DNS service hostname"),
+    "dns-parking.com": ("dns_nameserver", "high", "DNS parking service hostname"),
+    "jomodns.com": ("dns_nameserver", "high", "DNS service hostname"),
+    "hichina.com": ("dns_nameserver", "high", "registrar/DNS service hostname"),
+    "ttdns2.com": ("dns_nameserver", "high", "DNS service hostname"),
+    "nominetdns.uk": ("dns_nameserver", "high", "registry/DNS service hostname"),
+    "registrar-servers.com": ("dns_nameserver", "high", "registrar/DNS service hostname"),
+    "nic.direct": ("dns_nameserver", "high", "registry/registrar service hostname"),
     # CDN, cloud delivery, and static assets.
     "cloudflare.com": ("cdn_delivery", "high", "CDN/security provider hostname"),
     "gstatic.com": ("static_asset_host", "high", "Google static asset hostname"),
@@ -81,6 +113,22 @@ _RULES: dict[str, tuple[str, str, str]] = {
     "tiktokv.com": ("static_asset_host", "high", "TikTok delivery hostname"),
     "ytimg.com": ("static_asset_host", "high", "YouTube static asset hostname"),
     "okcdn.ru": ("cdn_delivery", "high", "CDN provider hostname"),
+    "trbcdn.net": ("cdn_delivery", "high", "CDN hostname"),
+    "cdn77.org": ("cdn_delivery", "high", "CDN hostname"),
+    "vedcdnlb.com": ("cdn_delivery", "high", "media CDN hostname"),
+    "azurefd.net": ("cdn_delivery", "high", "Azure Front Door hostname"),
+    "nflxso.net": ("cdn_delivery", "high", "media delivery hostname"),
+    "yccdn.ru": ("cdn_delivery", "high", "CDN hostname"),
+    "tm-azurefd.net": ("cdn_delivery", "high", "Azure Front Door hostname"),
+    "bytefcdn-oversea.com": ("cdn_delivery", "high", "CDN hostname"),
+    "static.microsoft": ("static_asset_host", "high", "Microsoft static asset hostname"),
+    "steamserver.net": ("game_service_infrastructure", "high", "game server hostname"),
+    "spo-msedge.net": ("static_asset_host", "high", "Microsoft Edge service hostname"),
+    "ax-msedge.net": ("static_asset_host", "high", "Microsoft Edge service hostname"),
+    "ggpht.com": ("static_asset_host", "high", "Google static asset hostname"),
+    "cdn-apple.com": ("static_asset_host", "high", "Apple static asset hostname"),
+    "sfx.ms": ("static_asset_host", "high", "Microsoft service asset hostname"),
+    "wac-msedge.net": ("static_asset_host", "high", "Microsoft Edge service hostname"),
     # Analytics and advertising infrastructure.
     "googletagmanager.com": ("analytics_advertising", "high", "tag-management hostname"),
     "appsflyersdk.com": ("analytics_advertising", "high", "mobile attribution SDK hostname"),
@@ -89,6 +137,12 @@ _RULES: dict[str, tuple[str, str, str]] = {
     "google-analytics.com": ("analytics_advertising", "high", "analytics collection hostname"),
     # Updates, identity, security, and telemetry.
     "windowsupdate.com": ("software_update", "high", "software update hostname"),
+    "msftncsi.com": ("connectivity_probe", "high", "Microsoft connectivity probe hostname"),
+    "msftconnecttest.com": (
+        "connectivity_probe",
+        "high",
+        "Microsoft connectivity probe hostname",
+    ),
     "gvt1.com": ("software_update", "high", "browser/software delivery hostname"),
     "gvt2.com": ("software_update", "high", "browser/software delivery hostname"),
     "microsoftonline.com": ("identity_service", "high", "Microsoft identity service hostname"),

@@ -16,6 +16,8 @@ from app.evaluation_celery_app import evaluation_celery_app
 from app.models import (
     AgePolicy,
     AuditLog,
+    BrowserInspection,
+    BrowserStatus,
     Category,
     ClassificationRun,
     ClassifierVersion,
@@ -883,6 +885,44 @@ async def _dispatch_existing_pending_pilot_runs(db: Db, pilot: PilotRun) -> list
     return runs
 
 
+async def _terminal_pilot_totals(db: Db, pilot: PilotRun) -> tuple[int, int, int]:
+    """Return completed, failed, and unresolved member totals without dispatching work."""
+    items = list(
+        (
+            await db.scalars(
+                select(PilotItem)
+                .where(PilotItem.pilot_id == pilot.id)
+                .order_by(PilotItem.selection_order)
+            )
+        ).all()
+    )
+    completed = 0
+    failed = 0
+    unresolved = 0
+    for item in items:
+        run = await db.get(ClassificationRun, item.classification_run_id)
+        if run is None:
+            unresolved += 1
+        elif run.status == RunStatus.COMPLETED:
+            completed += 1
+        elif run.status == RunStatus.FAILED:
+            recovery = await db.scalar(
+                select(BrowserInspection)
+                .where(BrowserInspection.source_run_id == run.id)
+                .order_by(BrowserInspection.created_at.desc())
+                .limit(1)
+            )
+            if recovery is None or recovery.status == BrowserStatus.FAILED:
+                failed += 1
+            elif recovery.status == BrowserStatus.COMPLETED:
+                completed += 1
+            else:
+                unresolved += 1
+        else:
+            unresolved += 1
+    return completed, failed, unresolved
+
+
 @router.post("/pilots/{pilot_id}/{action}")
 async def control_pilot(
     pilot_id: uuid.UUID, action: str, _: Csrf, admin: AdminUser, db: Db
@@ -893,7 +933,26 @@ async def control_pilot(
     if pilot.dry_run:
         raise HTTPException(status.HTTP_409_CONFLICT, "Dry-runs dispatch no jobs")
     dispatched = 0
-    if action == "resume-existing-pending" and pilot.status == PilotStatus.PAUSED:
+    audit_details: dict[str, object] = {"dispatched": dispatched}
+    if action == "finalize" and pilot.status == PilotStatus.PAUSED:
+        completed, failed, unresolved = await _terminal_pilot_totals(db, pilot)
+        if unresolved or completed + failed != pilot.size:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Pilot has unresolved or non-classification-terminal memberships",
+            )
+        pilot.processed_count = completed
+        pilot.failed_count = failed
+        pilot.status = PilotStatus.COMPLETED
+        pilot.completed_at = datetime.now(UTC)
+        audit_details = {
+            "dispatched": 0,
+            "completed": completed,
+            "failed": failed,
+            "unresolved": unresolved,
+        }
+        await db.commit()
+    elif action == "resume-existing-pending" and pilot.status == PilotStatus.PAUSED:
         runs = await _dispatch_existing_pending_pilot_runs(db, pilot)
         for run in runs:
             try:
@@ -946,7 +1005,7 @@ async def control_pilot(
             action=f"pilot.{action}",
             target_type="pilot_run",
             target_id=str(pilot.id),
-            details={"dispatched": dispatched},
+            details=audit_details,
         )
     )
     await db.commit()

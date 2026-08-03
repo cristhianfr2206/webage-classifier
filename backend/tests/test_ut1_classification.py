@@ -116,7 +116,7 @@ async def test_safe_infrastructure_exclusion_skips_http_and_has_no_age_policy(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="app.classification_service")
-    run_id = await seed(maker, "gtld-servers.net")
+    run_id = await seed(maker, "trbcdn.net")
 
     async def unexpected(_: object, __: str) -> None:
         raise AssertionError("HTTP inspection must be skipped")
@@ -135,13 +135,13 @@ async def test_safe_infrastructure_exclusion_skips_http_and_has_no_age_policy(
     assert results == []
     assert classifications == []
     assert run is not None
-    assert run.error_code == "non_consumer_infrastructure:dns_nameserver"
+    assert run.error_code == "non_consumer_infrastructure:cdn_delivery"
     assert run.status.value == "completed"
     record = next(
         item for item in caplog.records if item.message == "infrastructure_classification_excluded"
     )
     assert record.confidence_tier == "safe_exclude"
-    assert record.evidence == "authoritative TLD nameserver hostname"
+    assert record.evidence == "CDN hostname"
 
 
 async def test_evidence_only_infrastructure_continues_http(
