@@ -1,6 +1,6 @@
 # Multidimensional taxonomy model
 
-Phase 1 introduces storage only. It does not alter classification, feeds,
+Phases 1 and 2 introduce storage and a legacy-history projection only. They do not alter classification, feeds,
 infrastructure handling, browser handling, AI, APIs, pilots, seeded categories,
 or age-policy behavior.
 
@@ -26,6 +26,10 @@ publish that successor after review.
 No taxonomy labels are seeded in Phase 1, and no legacy classification rows are
 backfilled. Existing `categories`, `age_policies`, and `website_classifications`
 continue to be authoritative for current production behavior.
+
+Phase 2 publishes `initial-legacy-v1` with only `education-reference`,
+`entertainment-streaming`, and `social-networking`. It projects completed legacy
+classification runs into assessments without changing or deleting legacy rows.
 
 ## Assessment invariants
 

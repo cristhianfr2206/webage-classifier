@@ -53,6 +53,15 @@ class AssessmentLabelSource(str, enum.Enum):
     INFRASTRUCTURE = "infrastructure"
     AI = "ai"
     MANUAL = "manual"
+    LEGACY_BACKFILL = "legacy-backfill"
+
+
+INITIAL_LEGACY_TAXONOMY_VERSION = "initial-legacy-v1"
+LEGACY_CATEGORY_LABEL_SLUGS: dict[str, str] = {
+    "education": "education-reference",
+    "entertainment": "entertainment-streaming",
+    "social": "social-networking",
+}
 
 
 class TaxonomyInvariantError(ValueError):
