@@ -9,6 +9,8 @@ from app.ai_recommendation_service import (
     RecommendationError,
     cancel_recommendation,
     request_recommendation,
+    reserve_dispatch,
+    retry_recommendation,
 )
 from app.config import get_settings
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
@@ -62,8 +64,11 @@ async def request_case_recommendation(
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
         )
+        dispatch = await reserve_dispatch(
+            db, recommendation_id=item.id, queue_name=QueueName.AI_REALTIME.value
+        )
         await db.commit()
-        await dispatch_recommendation(item, QueueName.AI_REALTIME)
+        await dispatch_recommendation(item, QueueName.AI_REALTIME, task_id=dispatch.task_id)
     except (KeyError, ValueError, RecommendationError) as exc:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
@@ -93,6 +98,22 @@ async def list_case_recommendations(
     ]
 
 
+@router.get("/recommendations/{recommendation_id}")
+async def recommendation_detail(
+    recommendation_id: uuid.UUID, _: AdminUser, db: Db
+) -> dict[str, object]:
+    row = await db.get(AIRecommendation, recommendation_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recommendation not found")
+    return {
+        "id": row.id,
+        "status": row.status,
+        "confidence": row.confidence,
+        "result": row.result,
+        "failure_code": row.failure_code,
+    }
+
+
 @router.post("/recommendations/{recommendation_id}/cancel")
 async def cancel_case_recommendation(
     recommendation_id: uuid.UUID, _: Csrf, admin: AdminUser, db: Db
@@ -105,6 +126,32 @@ async def cancel_case_recommendation(
     except RecommendationError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
     return {"id": item.id, "status": item.status}
+
+
+@router.post("/recommendations/{recommendation_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_case_recommendation(
+    recommendation_id: uuid.UUID, payload: dict[str, object], _: Csrf, admin: AdminUser, db: Db
+) -> dict[str, object]:
+    try:
+        revision = int(payload["expected_revision"])
+        key = str(payload["idempotency_key"])[:120]
+        attempt = await retry_recommendation(
+            db,
+            get_settings(),
+            recommendation_id=recommendation_id,
+            actor_id=admin.id,
+            expected_revision=revision,
+            idempotency_key=key,
+        )
+        await db.commit()
+    except (KeyError, ValueError, RecommendationError) as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
+    return {
+        "recommendation_id": recommendation_id,
+        "attempt": attempt.attempt_number,
+        "status": attempt.status,
+    }
 
 
 async def _authorized(ai_id: uuid.UUID, user: CurrentUser, db: Db) -> AIClassification:

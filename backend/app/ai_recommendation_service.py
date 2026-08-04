@@ -18,6 +18,8 @@ from app.ai_provider import (
 from app.config import Settings
 from app.models import (
     AIRecommendation,
+    AIRecommendationAttempt,
+    AIRecommendationDispatch,
     AIRecommendationUsageReservation,
     AuditLog,
     ManualReviewCase,
@@ -38,6 +40,7 @@ TERMINAL = {
     "rejected-budget",
     "rejected-rate-limit",
 }
+RETRYABLE_FAILURES = {"provider_failed", "provider_timeout", "provider_unavailable", "worker_lost"}
 
 
 class RecommendationError(ValueError):
@@ -252,4 +255,116 @@ async def cancel_recommendation(
     item.status = "cancelled"
     item.cancelled_at = datetime.now(UTC)
     _audit(db, actor_id, item, "ai_recommendation.cancelled")
+    reservation = await db.scalar(
+        select(AIRecommendationUsageReservation).where(
+            AIRecommendationUsageReservation.recommendation_id == item.id
+        )
+    )
+    if reservation and reservation.status == "reserved":
+        reservation.status = "released"
+        reservation.settled_at = datetime.now(UTC)
+        _audit(db, actor_id, item, "ai_recommendation.reservation_released")
     return item
+
+
+async def retry_recommendation(
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    recommendation_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    expected_revision: int,
+    idempotency_key: str,
+) -> AIRecommendationAttempt:
+    if not settings.ai_enabled or settings.ai_recommendation_mode != "manual_only":
+        raise RecommendationError("ai_disabled")
+    item = await db.scalar(
+        select(AIRecommendation).where(AIRecommendation.id == recommendation_id).with_for_update()
+    )
+    if item is None or item.requested_by_id != actor_id:
+        raise RecommendationError("missing_recommendation")
+    case = await db.get(ManualReviewCase, item.review_case_id)
+    if case is None or case.locked or case.disposition and case.disposition.value == "cancelled":
+        raise RecommendationError("review_case_locked")
+    if case.revision != expected_revision:
+        raise RecommendationError("review_revision_conflict")
+    if item.status != "failed" or item.failure_code not in RETRYABLE_FAILURES:
+        raise RecommendationError("recommendation_not_retryable")
+    if item.retry_count >= settings.ai_max_retries:
+        raise RecommendationError("retry_limit_exceeded")
+    number = item.retry_count + 1
+    existing = await db.scalar(
+        select(AIRecommendationAttempt).where(
+            AIRecommendationAttempt.recommendation_id == item.id,
+            AIRecommendationAttempt.attempt_number == number,
+        )
+    )
+    if existing:
+        return existing
+    attempt = AIRecommendationAttempt(
+        recommendation_id=item.id, attempt_number=number, idempotency_key=idempotency_key
+    )
+    db.add(attempt)
+    item.retry_count = number
+    item.status = "pending"
+    item.failure_code = None
+    item.failure_message = ""
+    _audit(db, actor_id, item, "ai_recommendation.retry_requested")
+    return attempt
+
+
+async def reserve_dispatch(
+    db: AsyncSession, *, recommendation_id: uuid.UUID, queue_name: str
+) -> AIRecommendationDispatch:
+    item = await db.scalar(
+        select(AIRecommendation).where(AIRecommendation.id == recommendation_id).with_for_update()
+    )
+    if item is None or item.status in TERMINAL:
+        raise RecommendationError("recommendation_not_dispatchable")
+    attempt_number = item.retry_count
+    existing = await db.scalar(
+        select(AIRecommendationDispatch).where(
+            AIRecommendationDispatch.recommendation_id == item.id,
+            AIRecommendationDispatch.attempt_number == attempt_number,
+        )
+    )
+    if existing:
+        return existing
+    dispatch = AIRecommendationDispatch(
+        recommendation_id=item.id,
+        attempt_number=attempt_number,
+        task_id=str(uuid.uuid4()),
+        queue_name=queue_name,
+    )
+    db.add(dispatch)
+    _audit(db, item.requested_by_id, item, "ai_recommendation.dispatch_reserved")
+    return dispatch
+
+
+async def reconcile_stale_recommendations(db: AsyncSession, settings: Settings) -> int:
+    cutoff = datetime.now(UTC).replace(microsecond=0)
+    rows = list(
+        (
+            await db.scalars(
+                select(AIRecommendation).where(AIRecommendation.status.in_(("pending", "running")))
+            )
+        ).all()
+    )
+    changed = 0
+    for item in rows:
+        timestamp = item.started_at or item.created_at
+        if (
+            timestamp
+            and (cutoff - timestamp).total_seconds() < settings.ai_recommendation_stale_seconds
+        ):
+            continue
+        case = await db.get(ManualReviewCase, item.review_case_id)
+        if case is None or case.locked or item.status == "cancelled":
+            continue
+        item.status = "failed"
+        item.failure_code = "worker_lost"
+        item.failure_message = "Recommendation did not complete"
+        item.completed_at = datetime.now(UTC)
+        _audit(db, item.requested_by_id, item, "ai_recommendation.stale_failed")
+        changed += 1
+    return changed

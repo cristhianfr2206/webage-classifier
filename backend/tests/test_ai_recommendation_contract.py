@@ -376,7 +376,8 @@ async def test_existing_api_request_list_cancel_contract_is_authenticated_and_sa
 
     dispatched: list[uuid.UUID] = []
 
-    async def no_dispatch(item: AIRecommendation, _: object) -> None:
+    async def no_dispatch(item: AIRecommendation, queue: object, **kwargs: object) -> None:
+        del queue, kwargs
         dispatched.append(item.id)
 
     app.dependency_overrides[get_db] = database

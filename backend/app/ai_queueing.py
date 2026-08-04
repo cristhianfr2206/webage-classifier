@@ -24,13 +24,16 @@ async def revoke_ai(job: AIClassification) -> None:
         await asyncio.to_thread(AsyncResult(job.task_id, app=ai_celery_app).revoke, terminate=False)
 
 
-async def dispatch_recommendation(job: AIRecommendation, queue: QueueName = QueueName.AI) -> None:
+async def dispatch_recommendation(
+    job: AIRecommendation, queue: QueueName = QueueName.AI, *, task_id: str | None = None
+) -> None:
     if queue not in {QueueName.AI, QueueName.AI_REALTIME}:
         raise RuntimeError("invalid recommendation queue")
     await asyncio.to_thread(
         ai_celery_app.send_task,
         "app.ai_tasks.execute_recommendation",
         args=[str(job.id)],
+        task_id=task_id,
         queue=queue.value,
         routing_key=queue.value,
     )

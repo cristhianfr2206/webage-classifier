@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     ai_requests_per_domain: int = Field(default=5, ge=1, le=1000)
     ai_temperature: float = Field(default=0, ge=0, le=1)
     ai_recommendation_mode: str = Field(default="manual_only", pattern=r"^manual_only$")
+    ai_recommendation_max_requests_per_case: int = Field(default=3, ge=1, le=20)
+    ai_recommendation_stale_seconds: int = Field(default=120, ge=30, le=3600)
     evaluation_worker_concurrency: int = Field(default=1, ge=1, le=8)
     evaluation_batch_size: int = Field(default=100, ge=1, le=1000)
     pilot_capacity_limit: int = Field(default=100, ge=1, le=1000)

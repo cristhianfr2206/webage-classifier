@@ -13,6 +13,9 @@ def test_ai_queues_and_routes_are_isolated() -> None:
         "queue": "ai_maintenance"
     }
     assert ai_celery_app.conf.task_routes["app.ai_tasks.execute_recommendation"] == {"queue": "ai"}
+    assert ai_celery_app.conf.task_routes["app.ai_tasks.reconcile_stale_recommendations"] == {
+        "queue": "ai_maintenance"
+    }
 
 
 def test_ai_worker_registry_contains_only_ai_tasks() -> None:
@@ -23,5 +26,6 @@ def test_ai_worker_registry_contains_only_ai_tasks() -> None:
     assert names == {
         "app.ai_tasks.classify_ai",
         "app.ai_tasks.execute_recommendation",
+        "app.ai_tasks.reconcile_stale_recommendations",
         "app.ai_tasks.recover_stale_ai",
     }
