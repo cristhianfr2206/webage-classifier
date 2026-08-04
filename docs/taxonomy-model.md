@@ -1,6 +1,6 @@
 # Multidimensional taxonomy model
 
-Phases 1 through 3 introduce storage and historical projections only. They do not alter classification, feeds,
+Phases 1 through 4 introduce storage and historical projections only. They do not alter classification, feeds,
 infrastructure handling, browser handling, AI, APIs, pilots, seeded categories,
 or age-policy behavior.
 
@@ -36,6 +36,21 @@ preserves those content labels and adds only scope labels already emitted by
 completed safe infrastructure exclusions. Infrastructure assessments have the
 `non-consumer-infrastructure` disposition, no primary content label, and no
 age-policy decision.
+
+Phase 4 publishes `initial-content-v3`, a successor to the scope snapshot. It
+preserves every Phase 3 label and adds `news-media`, `shopping-ecommerce`,
+`gaming`, and `technology-software`. The accompanying deterministic rules are
+internal/offline only: they require independent evidence families and are not
+called by `classification_service`, browser processing, or an API endpoint.
+Their future-facing policy defaults are general for news, shopping, and
+technology/software, and teen (minimum age 13) for gaming. They do not write a
+policy decision, change a legacy category, or recommend blocking in Phase 4.
+
+UT1 `shopping` and `games` are mapped only to low-confidence supporting labels
+for offline evaluation. They cannot short-circuit HTTP/browser processing or
+produce a final taxonomy assessment. Existing UT1 `social_networks` and
+`audio-video` behavior remains unchanged. Infrastructure exclusions always take
+precedence over these prospective content candidates.
 
 ## Assessment invariants
 

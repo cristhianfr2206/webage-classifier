@@ -58,6 +58,7 @@ class AssessmentLabelSource(str, enum.Enum):
 
 INITIAL_LEGACY_TAXONOMY_VERSION = "initial-legacy-v1"
 INITIAL_SCOPE_TAXONOMY_VERSION = "initial-scope-v2"
+INITIAL_CONTENT_TAXONOMY_VERSION = "initial-content-v3"
 LEGACY_CATEGORY_LABEL_SLUGS: dict[str, str] = {
     "education": "education-reference",
     "entertainment": "entertainment-streaming",
@@ -72,6 +73,21 @@ INFRASTRUCTURE_SCOPE_LABEL_SLUGS: dict[str, str] = {
     "static_asset_host": "static-asset-host",
     "time_service": "time-service",
 }
+
+# Phase 4 keeps these labels internal to the taxonomy rollout.  They are not
+# mapped into the legacy Category table and they are not consulted by the live
+# classification pipeline yet.
+INITIAL_CONTENT_LABEL_SLUGS = frozenset(
+    {
+        "education-reference",
+        "entertainment-streaming",
+        "social-networking",
+        "news-media",
+        "shopping-ecommerce",
+        "gaming",
+        "technology-software",
+    }
+)
 
 
 class TaxonomyInvariantError(ValueError):
