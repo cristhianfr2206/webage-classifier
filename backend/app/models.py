@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import enum
+import json
 import uuid
 from datetime import datetime
 
@@ -37,6 +38,9 @@ from app.taxonomy import (
     AssessmentLabelRole,
     AssessmentLabelSource,
     FeedHandlingMode,
+    ReviewDecisionState,
+    ReviewDisposition,
+    ReviewLabelRole,
     TaxonomyDimension,
     TaxonomyInvariantError,
     TaxonomyLabelStatus,
@@ -746,6 +750,64 @@ def enforce_taxonomy_orm_invariants(
         if assessment is not None and label.taxonomy_version_id != assessment.taxonomy_version_id:
             raise TaxonomyInvariantError("assessment_label_taxonomy_mismatch")
 
+    for snapshot in (*session.dirty, *session.deleted):
+        if not isinstance(snapshot, ManualReviewEvidenceSnapshot):
+            continue
+        if inspect(snapshot).persistent:
+            raise TaxonomyInvariantError("review_evidence_snapshot_is_immutable")
+
+    for snapshot in session.new:
+        if not isinstance(snapshot, ManualReviewEvidenceSnapshot):
+            continue
+        encoded = json.dumps(snapshot.payload, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) != snapshot.payload_size_bytes:
+            raise TaxonomyInvariantError("review_evidence_snapshot_size_mismatch")
+        if len(encoded.encode("utf-8")) > 65_536:
+            raise TaxonomyInvariantError("review_evidence_snapshot_too_large")
+
+    for case in (*session.new, *session.dirty):
+        if not isinstance(case, ManualReviewCase):
+            continue
+        # Legacy rows and SQLAlchemy's Python-side defaults can present as
+        # ``None`` until their first flush; the database default is 0.
+        if case.revision is not None and case.revision < 0:
+            raise TaxonomyInvariantError("review_revision_must_be_nonnegative")
+        if case.locked and case.disposition is ReviewDisposition.IN_REVIEW:
+            raise TaxonomyInvariantError("locked_review_case_cannot_be_in_review")
+        locked_history = inspect(case).attrs.locked.history
+        was_locked = bool(locked_history.deleted and locked_history.deleted[0])
+        if was_locked and not case.locked:
+            allowed = session.info.get("review_reopen_case_ids", set())
+            if case.id not in allowed:
+                raise TaxonomyInvariantError("locked_review_case_requires_privileged_reopen")
+        if inspect(case).persistent and was_locked and case.locked:
+            changed = {attr.key for attr in inspect(case).attrs if attr.history.has_changes()}
+            if changed - {"updated_at"}:
+                raise TaxonomyInvariantError("locked_review_case_is_immutable")
+
+    for decision in (*session.new, *session.dirty):
+        if not isinstance(decision, ManualReviewLabelDecision):
+            continue
+        label = session.get(TaxonomyLabel, decision.taxonomy_label_id)
+        case = session.get(ManualReviewCase, decision.review_case_id)
+        if label is None or case is None:
+            continue
+        if case.locked:
+            raise TaxonomyInvariantError("locked_review_case_is_immutable")
+        if case.taxonomy_version_id != decision.taxonomy_version_id:
+            raise TaxonomyInvariantError("review_decision_taxonomy_mismatch")
+        if label.taxonomy_version_id != decision.taxonomy_version_id:
+            raise TaxonomyInvariantError("review_label_taxonomy_mismatch")
+        if label.dimension is not decision.dimension:
+            raise TaxonomyInvariantError("review_label_dimension_mismatch")
+        if decision.role is ReviewLabelRole.PRIMARY:
+            if decision.state is not ReviewDecisionState.ACCEPTED:
+                raise TaxonomyInvariantError("review_primary_must_be_accepted")
+            if label.dimension is not TaxonomyDimension.CONTENT:
+                raise TaxonomyInvariantError("review_primary_must_be_active_content")
+            if label.status is not TaxonomyLabelStatus.ACTIVE:
+                raise TaxonomyInvariantError("review_primary_must_be_active_content")
+
 
 class EvaluationDataset(Base):
     __tablename__ = "evaluation_datasets"
@@ -868,16 +930,48 @@ class ManualReviewCase(Base):
     classification_run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("classification_runs.id")
     )
+    # Phase 1A fields are nullable for legacy cases.  New cases are created
+    # through review_service with a taxonomy version and frozen evidence.
+    taxonomy_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    source_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_assessments.id", ondelete="SET NULL"), index=True
+    )
+    evidence_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("manual_review_evidence_snapshots.id", ondelete="SET NULL"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    disposition: Mapped[ReviewDisposition | None] = mapped_column(
+        Enum(ReviewDisposition, name="review_disposition"), index=True
+    )
+    conflict_flags: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=list,
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
     status: Mapped[ReviewStatus] = mapped_column(
         Enum(ReviewStatus, name="review_status"), default=ReviewStatus.PENDING, index=True
     )
     reason: Mapped[str] = mapped_column(String(500))
     assigned_to_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    claimed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     final_category_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("categories.id"))
     final_age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lock_reason: Mapped[str] = mapped_column(String(500), default="")
+    reopened_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    reopened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reopen_reason: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class ManualReviewDecision(Base):
@@ -892,6 +986,83 @@ class ManualReviewDecision(Base):
     age_policy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("age_policies.id"))
     notes: Mapped[str] = mapped_column(String(1000), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ManualReviewEvidenceSnapshot(Base):
+    """A frozen, sanitized evidence view for one explicitly routed review case."""
+
+    __tablename__ = "manual_review_evidence_snapshots"
+    __table_args__ = (
+        CheckConstraint("length(evidence_checksum) = 64", name="ck_review_snapshot_checksum"),
+        CheckConstraint("payload_size_bytes BETWEEN 2 AND 65536", name="ck_review_snapshot_size"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_cases.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    source_classification_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_runs.id", ondelete="SET NULL"), index=True
+    )
+    browser_inspection_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("browser_inspections.id", ondelete="SET NULL"), index=True
+    )
+    feed_evidence_reference: Mapped[str] = mapped_column(String(500), default="")
+    source_assessment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("classification_assessments.id", ondelete="SET NULL"), index=True
+    )
+    payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    payload_size_bytes: Mapped[int] = mapped_column(Integer)
+    evidence_checksum: Mapped[str] = mapped_column(String(64), unique=True)
+    provenance: Mapped[str] = mapped_column(String(1000), default="")
+    payload_schema_version: Mapped[str] = mapped_column(String(20), default="1")
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ManualReviewLabelDecision(Base):
+    """A reviewer-owned, version-scoped taxonomy-label decision."""
+
+    __tablename__ = "manual_review_label_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "reviewer_confidence BETWEEN 0 AND 100", name="ck_review_decision_confidence"
+        ),
+        Index(
+            "uq_review_active_primary_content_decision",
+            "review_case_id",
+            unique=True,
+            postgresql_where=text(
+                "state = 'ACCEPTED' AND role = 'PRIMARY' AND superseded_at IS NULL"
+            ),
+            sqlite_where=text("state = 'ACCEPTED' AND role = 'PRIMARY' AND superseded_at IS NULL"),
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_cases.id", ondelete="CASCADE"), index=True
+    )
+    taxonomy_label_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_labels.id", ondelete="RESTRICT"), index=True
+    )
+    taxonomy_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    dimension: Mapped[TaxonomyDimension] = mapped_column(
+        Enum(TaxonomyDimension, name="taxonomy_dimension")
+    )
+    role: Mapped[ReviewLabelRole] = mapped_column(Enum(ReviewLabelRole, name="review_label_role"))
+    state: Mapped[ReviewDecisionState] = mapped_column(
+        Enum(ReviewDecisionState, name="review_decision_state"), index=True
+    )
+    reviewer_confidence: Mapped[int] = mapped_column(Integer)
+    rationale: Mapped[str] = mapped_column(String(2000), default="")
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class PilotRun(Base):

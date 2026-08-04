@@ -57,6 +57,37 @@ class AssessmentLabelSource(str, enum.Enum):
     LEGACY_BACKFILL = "legacy-backfill"
 
 
+class ReviewDisposition(str, enum.Enum):
+    """Terminal or working state for an explicitly routed review case.
+
+    This is intentionally independent of the legacy ``ReviewStatus`` enum.
+    A review case is optional: a failed or uncertain classification is not
+    implicitly a review case.
+    """
+
+    PENDING_REVIEW = "pending-review"
+    IN_REVIEW = "in-review"
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+    NON_CONSUMER_INFRASTRUCTURE = "non-consumer-infrastructure"
+    UNREACHABLE = "unreachable"
+    SAFETY_BLOCKED = "safety-blocked"
+    CANCELLED = "cancelled"
+
+
+class ReviewDecisionState(str, enum.Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    OVERRIDDEN = "overridden"
+
+
+class ReviewLabelRole(str, enum.Enum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+    SUPPORTING = "supporting"
+    REJECTED_CANDIDATE = "rejected-candidate"
+
+
 class FeedHandlingMode(str, enum.Enum):
     FINAL_CANDIDATE = "final_candidate"
     SUPPORTING_EVIDENCE = "supporting_evidence"
