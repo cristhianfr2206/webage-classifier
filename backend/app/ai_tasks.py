@@ -11,12 +11,14 @@ from sqlalchemy import select
 
 from app.ai_celery_app import ai_celery_app
 from app.ai_provider import AIProviderError
+from app.ai_recommendation_service import RecommendationError, execute_recommendation
 from app.ai_service import AIJobError, execute_ai_classification
 from app.config import get_settings
 from app.database import SessionLocal, engine
 from app.job_control import DomainLock
 from app.models import (
     AIClassification,
+    AIRecommendation,
     AIStatus,
     ClassificationRun,
     ManualReviewCase,
@@ -168,6 +170,37 @@ def recover_stale_ai() -> int:
 
     result = _run(recover())
     return result if isinstance(result, int) else 0
+
+
+@ai_celery_app.task(
+    bind=True,
+    name="app.ai_tasks.execute_recommendation",
+    acks_late=True,
+    reject_on_worker_lost=True,
+    soft_time_limit=settings.ai_timeout_seconds + 5,
+    time_limit=settings.ai_timeout_seconds + 10,
+)
+def execute_recommendation_task(self: Task, recommendation_id_value: str) -> None:
+    try:
+        recommendation_id = uuid.UUID(recommendation_id_value)
+    except ValueError:
+        logger.error("invalid_ai_recommendation_payload")
+        return
+
+    async def execute() -> None:
+        async with SessionLocal() as db:
+            item = await db.get(AIRecommendation, recommendation_id)
+            if item is None or item.status in {"completed", "cancelled"}:
+                return
+            try:
+                await execute_recommendation(db, settings, recommendation_id)
+            except RecommendationError as exc:
+                item.status = "failed"
+                item.failure_code = str(exc)[:80]
+                item.failure_message = "Recommendation did not complete"
+            await db.commit()
+
+    _run(execute())
 
 
 for registered_name in tuple(ai_celery_app.tasks):

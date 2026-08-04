@@ -3,7 +3,7 @@ import asyncio
 from celery.result import AsyncResult
 
 from app.ai_celery_app import ai_celery_app
-from app.models import AIClassification, QueueName
+from app.models import AIClassification, AIRecommendation, QueueName
 
 
 async def dispatch_ai(job: AIClassification, queue: QueueName) -> None:
@@ -22,3 +22,15 @@ async def dispatch_ai(job: AIClassification, queue: QueueName) -> None:
 async def revoke_ai(job: AIClassification) -> None:
     if job.task_id:
         await asyncio.to_thread(AsyncResult(job.task_id, app=ai_celery_app).revoke, terminate=False)
+
+
+async def dispatch_recommendation(job: AIRecommendation, queue: QueueName = QueueName.AI) -> None:
+    if queue not in {QueueName.AI, QueueName.AI_REALTIME}:
+        raise RuntimeError("invalid recommendation queue")
+    await asyncio.to_thread(
+        ai_celery_app.send_task,
+        "app.ai_tasks.execute_recommendation",
+        args=[str(job.id)],
+        queue=queue.value,
+        routing_key=queue.value,
+    )

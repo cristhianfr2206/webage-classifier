@@ -4,12 +4,18 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select
 
-from app.ai_queueing import dispatch_ai, revoke_ai
+from app.ai_queueing import dispatch_ai, dispatch_recommendation, revoke_ai
+from app.ai_recommendation_service import (
+    RecommendationError,
+    cancel_recommendation,
+    request_recommendation,
+)
 from app.config import get_settings
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
 from app.models import (
     AIClassification,
     AIConfiguration,
+    AIRecommendation,
     AIStatus,
     AuditLog,
     ClassificationRun,
@@ -32,6 +38,73 @@ from app.versioning import active_classifier_version_id
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 ACTIVE = (AIStatus.PENDING, AIStatus.RETRYING, AIStatus.RUNNING)
+
+
+@router.post("/review-cases/{case_id}/recommendations", status_code=status.HTTP_202_ACCEPTED)
+async def request_case_recommendation(
+    case_id: uuid.UUID,
+    payload: dict[str, object],
+    _: Csrf,
+    admin: AdminUser,
+    db: Db,
+) -> dict[str, object]:
+    try:
+        revision_value = payload["expected_revision"]
+        if not isinstance(revision_value, int | str):
+            raise ValueError("expected_revision must be an integer")
+        expected_revision = int(revision_value)
+        idempotency_key = str(payload["idempotency_key"])[:120]
+        item = await request_recommendation(
+            db,
+            get_settings(),
+            case_id=case_id,
+            actor_id=admin.id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+        )
+        await db.commit()
+        await dispatch_recommendation(item, QueueName.AI_REALTIME)
+    except (KeyError, ValueError, RecommendationError) as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
+    return {"id": item.id, "status": item.status, "confidence": item.confidence}
+
+
+@router.get("/review-cases/{case_id}/recommendations")
+async def list_case_recommendations(
+    case_id: uuid.UUID, _: AdminUser, db: Db
+) -> list[dict[str, object]]:
+    rows = list(
+        (
+            await db.scalars(
+                select(AIRecommendation).where(AIRecommendation.review_case_id == case_id)
+            )
+        ).all()
+    )
+    return [
+        {
+            "id": row.id,
+            "status": row.status,
+            "confidence": row.confidence,
+            "result": row.result,
+            "failure_code": row.failure_code,
+        }
+        for row in rows
+    ]
+
+
+@router.post("/recommendations/{recommendation_id}/cancel")
+async def cancel_case_recommendation(
+    recommendation_id: uuid.UUID, _: Csrf, admin: AdminUser, db: Db
+) -> dict[str, object]:
+    try:
+        item = await cancel_recommendation(
+            db, recommendation_id=recommendation_id, actor_id=admin.id
+        )
+        await db.commit()
+    except RecommendationError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
+    return {"id": item.id, "status": item.status}
 
 
 async def _authorized(ai_id: uuid.UUID, user: CurrentUser, db: Db) -> AIClassification:

@@ -398,6 +398,91 @@ class AIConfiguration(Base):
     )
 
 
+class AIRecommendation(Base):
+    """Advisory output for an unlocked manual-review case only.
+
+    This table is intentionally not linked to a ClassificationRun: applying a
+    recommendation is a later human-review action, never a task side effect.
+    """
+
+    __tablename__ = "ai_recommendations"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_case_id",
+            "evidence_snapshot_id",
+            "taxonomy_version_id",
+            "provider",
+            "model",
+            "prompt_version",
+            "allowed_label_checksum",
+            "idempotency_key",
+            name="uq_ai_recommendation_idempotency",
+        ),
+        CheckConstraint(
+            "confidence IS NULL OR confidence BETWEEN 0 AND 100",
+            name="ck_ai_recommendation_confidence",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_cases.id", ondelete="CASCADE"), index=True
+    )
+    evidence_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_evidence_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    taxonomy_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"), index=True
+    )
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    model: Mapped[str] = mapped_column(String(120))
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    prompt_checksum: Mapped[str] = mapped_column(String(64))
+    allowed_label_checksum: Mapped[str] = mapped_column(String(64))
+    input_checksum: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    result: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),  # type: ignore[no-untyped-call]
+        default=dict,
+    )
+    confidence: Mapped[int | None] = mapped_column(Integer)
+    uncertainty_reason: Mapped[str] = mapped_column(String(500), default="")
+    prompt_injection_suspected: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost_microunits: Mapped[int | None] = mapped_column(Integer)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    failure_message: Mapped[str] = mapped_column(String(300), default="")
+    audit_disposition: Mapped[str] = mapped_column(String(80), default="requested")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AIRecommendationUsageReservation(Base):
+    __tablename__ = "ai_recommendation_usage_reservations"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", name="uq_ai_recommendation_reservation"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recommendation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_recommendations.id", ondelete="CASCADE"), index=True
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    review_case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("manual_review_cases.id", ondelete="CASCADE"), index=True
+    )
+    reserved_cost_microunits: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class RulesetVersion(Base):
     __tablename__ = "ruleset_versions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
