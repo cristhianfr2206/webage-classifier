@@ -17,6 +17,7 @@ class TaxonomyVersionStatus(str, enum.Enum):
 
 class TaxonomyLabelStatus(str, enum.Enum):
     ACTIVE = "active"
+    INACTIVE = "inactive"
     DEPRECATED = "deprecated"
 
 
@@ -56,9 +57,19 @@ class AssessmentLabelSource(str, enum.Enum):
     LEGACY_BACKFILL = "legacy-backfill"
 
 
+class FeedHandlingMode(str, enum.Enum):
+    FINAL_CANDIDATE = "final_candidate"
+    SUPPORTING_EVIDENCE = "supporting_evidence"
+    HIGH_RISK_EVIDENCE = "high_risk_evidence"
+    UNSUPPORTED = "unsupported"
+    IGNORE = "ignore"
+
+
 INITIAL_LEGACY_TAXONOMY_VERSION = "initial-legacy-v1"
 INITIAL_SCOPE_TAXONOMY_VERSION = "initial-scope-v2"
 INITIAL_CONTENT_TAXONOMY_VERSION = "initial-content-v3"
+INITIAL_FEEDS_TAXONOMY_VERSION = "initial-feeds-v4"
+INITIAL_UT1_MAPPING_VERSION = "ut1-initial-v1"
 LEGACY_CATEGORY_LABEL_SLUGS: dict[str, str] = {
     "education": "education-reference",
     "entertainment": "entertainment-streaming",

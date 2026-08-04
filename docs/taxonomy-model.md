@@ -1,6 +1,6 @@
 # Multidimensional taxonomy model
 
-Phases 1 through 4 introduce storage and historical projections only. They do not alter classification, feeds,
+Phases 1 through 5 introduce storage and historical projections only. They do not alter classification, feeds,
 infrastructure handling, browser handling, AI, APIs, pilots, seeded categories,
 or age-policy behavior.
 
@@ -51,6 +51,20 @@ for offline evaluation. They cannot short-circuit HTTP/browser processing or
 produce a final taxonomy assessment. Existing UT1 `social_networks` and
 `audio-video` behavior remains unchanged. Infrastructure exclusions always take
 precedence over these prospective content candidates.
+
+Phase 5 publishes `initial-feeds-v4`, preserving all v3 labels and adding the
+inactive, review-gated content-risk labels `adult-content` and `gambling`.
+`feed_label_mappings` is version-scoped, immutable once its taxonomy version is
+published, and stores source/category, target label, handling mode, confidence,
+review requirement, mapping version, enabled state, and creation time. It has
+no age-policy, security, or enforcement fields.
+
+The initial `ut1-initial-v1` mapping set is evaluation-only: education is a
+potential final candidate; social, audio-video, shopping, and games are
+supporting evidence; adult and gambling are high-risk evidence requiring
+review. No mapping is wired into the live UT1 lookup. Exact infrastructure
+exclusions suppress all prospective feed results; conflicts and high-risk
+signals require review. Missing or unsupported mappings remain unknown.
 
 ## Assessment invariants
 

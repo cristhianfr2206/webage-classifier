@@ -36,6 +36,7 @@ from app.taxonomy import (
     AssessmentDisposition,
     AssessmentLabelRole,
     AssessmentLabelSource,
+    FeedHandlingMode,
     TaxonomyDimension,
     TaxonomyInvariantError,
     TaxonomyLabelStatus,
@@ -485,6 +486,46 @@ class TaxonomyLabel(Base):
     taxonomy_version: Mapped[TaxonomyVersion] = relationship()
 
 
+class FeedLabelMapping(Base):
+    """A source-category mapping scoped to one immutable taxonomy snapshot.
+
+    Feed mappings deliberately do not carry a policy, security verdict, or
+    enforcement result. They are a provenance-preserving input for later
+    assessment work only.
+    """
+
+    __tablename__ = "feed_label_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "taxonomy_version_id",
+            "source_name",
+            "source_category",
+            "mapping_version",
+            name="uq_feed_label_mapping_version_source_category",
+        ),
+        CheckConstraint("confidence BETWEEN 0 AND 100", name="ck_feed_label_mapping_confidence"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    taxonomy_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("taxonomy_versions.id", ondelete="CASCADE"), index=True
+    )
+    source_name: Mapped[str] = mapped_column(String(80), index=True)
+    source_category: Mapped[str] = mapped_column(String(120))
+    target_label_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("taxonomy_labels.id", ondelete="RESTRICT"), index=True
+    )
+    handling_mode: Mapped[FeedHandlingMode] = mapped_column(
+        Enum(FeedHandlingMode, name="feed_handling_mode"), index=True
+    )
+    confidence: Mapped[int] = mapped_column(Integer)
+    review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    mapping_version: Mapped[str] = mapped_column(String(80))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    taxonomy_version: Mapped[TaxonomyVersion] = relationship()
+    target_label: Mapped[TaxonomyLabel | None] = relationship()
+
+
 class ClassificationAssessment(Base):
     """A future normalized projection of one classification run.
 
@@ -600,6 +641,14 @@ def _taxonomy_version_for_label(
     return session.get(TaxonomyVersion, label.taxonomy_version_id)
 
 
+def _taxonomy_version_for_feed_mapping(
+    session: SyncSession, mapping: FeedLabelMapping
+) -> TaxonomyVersion | None:
+    if mapping.taxonomy_version is not None:
+        return mapping.taxonomy_version
+    return session.get(TaxonomyVersion, mapping.taxonomy_version_id)
+
+
 @event.listens_for(SyncSession, "before_flush")
 def enforce_taxonomy_orm_invariants(
     session: SyncSession, _flush_context: object, _instances: object
@@ -632,6 +681,38 @@ def enforce_taxonomy_orm_invariants(
             and taxonomy_version.status is TaxonomyVersionStatus.PUBLISHED
         ):
             raise TaxonomyInvariantError("published_taxonomy_labels_are_immutable")
+
+    for mapping in (*session.new, *session.dirty, *session.deleted):
+        if not isinstance(mapping, FeedLabelMapping):
+            continue
+        taxonomy_version = _taxonomy_version_for_feed_mapping(session, mapping)
+        if (
+            taxonomy_version is not None
+            and taxonomy_version.status is TaxonomyVersionStatus.PUBLISHED
+        ):
+            raise TaxonomyInvariantError("published_feed_mappings_are_immutable")
+
+    for mapping in (*session.new, *session.dirty):
+        if not isinstance(mapping, FeedLabelMapping):
+            continue
+        target_label = mapping.target_label
+        if target_label is None and mapping.target_label_id is not None:
+            target_label = session.get(TaxonomyLabel, mapping.target_label_id)
+        requires_target = mapping.handling_mode in {
+            FeedHandlingMode.FINAL_CANDIDATE,
+            FeedHandlingMode.SUPPORTING_EVIDENCE,
+            FeedHandlingMode.HIGH_RISK_EVIDENCE,
+        }
+        if requires_target and target_label is None:
+            raise TaxonomyInvariantError("feed_mapping_target_required")
+        if not requires_target and target_label is not None:
+            raise TaxonomyInvariantError("feed_mapping_target_forbidden")
+        if target_label is None:
+            continue
+        if target_label.taxonomy_version_id != mapping.taxonomy_version_id:
+            raise TaxonomyInvariantError("feed_mapping_target_taxonomy_mismatch")
+        if target_label.dimension is not TaxonomyDimension.CONTENT:
+            raise TaxonomyInvariantError("feed_mapping_target_must_be_content")
 
     for assessment in (*session.new, *session.dirty):
         if not isinstance(assessment, ClassificationAssessment):
