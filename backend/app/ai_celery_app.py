@@ -26,6 +26,7 @@ ai_celery_app.conf.update(
         "app.ai_tasks.classify_ai": {"queue": "ai"},
         "app.ai_tasks.recover_stale_ai": {"queue": "ai_maintenance"},
         "app.ai_tasks.execute_recommendation": {"queue": "ai"},
+        "app.ai_tasks.reconcile_stale_recommendations": {"queue": "ai_maintenance"},
     },
     imports=("app.ai_tasks",),
     worker_cancel_long_running_tasks_on_connection_loss=True,

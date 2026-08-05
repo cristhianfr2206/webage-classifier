@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -24,6 +25,7 @@ from app.ai_recommendation_service import (
     execute_recommendation,
     failure_class,
     mark_dispatch_result,
+    reconcile_stale_recommendation_attempts,
     request_recommendation,
     reserve_attempt_dispatch,
     retry_recommendation,
@@ -749,3 +751,67 @@ async def test_retry_and_detail_api_are_idempotent_and_csrf_protected(
         assert "api_key" not in str(detail.json()).lower()
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_marks_only_stale_attempts_without_provider_or_classification_work(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        stale = await request_recommendation(
+            db,
+            recommendation_settings(),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="stale-pending",
+        )
+        fresh = await request_recommendation(
+            db,
+            recommendation_settings(),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="fresh-pending",
+        )
+        attempts = list((await db.scalars(select(AIRecommendationAttempt))).all())
+        stale_attempt = next(row for row in attempts if row.recommendation_id == stale.id)
+        fresh_attempt = next(row for row in attempts if row.recommendation_id == fresh.id)
+        stale_attempt.requested_at = datetime.now(UTC) - timedelta(hours=1)
+        result = await reconcile_stale_recommendation_attempts(db, recommendation_settings())
+        assert result["failed_transient"] == 1
+        assert stale_attempt.status == "failed-transient"
+        assert stale_attempt.retryable is True
+        assert fresh_attempt.status == "pending"
+        assert await db.scalar(select(func.count(WebsiteClassification.id))) == 0
+        assert await db.scalar(select(func.count(ClassificationAssessment.id))) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_skips_locked_and_releases_stale_reservation(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        item = await request_recommendation(
+            db,
+            recommendation_settings(),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="stale-reservation",
+        )
+        attempt = await db.scalar(
+            select(AIRecommendationAttempt).where(
+                AIRecommendationAttempt.recommendation_id == item.id
+            )
+        )
+        assert attempt is not None
+        reservation, _ = await reserve_attempt_dispatch(db, attempt_id=attempt.id, queue_name="ai")
+        reservation.reserved_at = datetime.now(UTC) - timedelta(hours=1)
+        attempt.status = "pending"
+        result = await reconcile_stale_recommendation_attempts(db, recommendation_settings())
+        assert result["released_reservations"] == 1
+        assert reservation.state == "failed"
+        assert attempt.status == "failed-transient"

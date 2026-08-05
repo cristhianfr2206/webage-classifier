@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -521,3 +521,165 @@ async def cancel_recommendation(
     _audit(db, actor_id, item, "ai_recommendation.cancelled")
     _audit(db, actor_id, item, "ai_recommendation.attempt_cancelled")
     return item
+
+
+async def reconcile_stale_recommendation_attempts(
+    db: AsyncSession, settings: Settings, *, actor_id: uuid.UUID | None = None
+) -> dict[str, int]:
+    """Fail only demonstrably abandoned advisory attempts; never enqueue or infer."""
+    now = datetime.now(UTC)
+    counters = {
+        "scanned": 0,
+        "failed_transient": 0,
+        "released_reservations": 0,
+        "skipped_locked": 0,
+        "skipped_cancelled": 0,
+        "skipped_terminal": 0,
+        "skipped_invalid": 0,
+        "lease_prevented": 0,
+    }
+    candidates = list(
+        (
+            await db.scalars(
+                select(AIRecommendationAttempt)
+                .where(AIRecommendationAttempt.status.in_(("pending", "dispatched", "running")))
+                .order_by(AIRecommendationAttempt.created_at, AIRecommendationAttempt.id)
+                .limit(settings.ai_reconciliation_batch_size)
+            )
+        ).all()
+    )
+    for candidate in candidates:
+        counters["scanned"] += 1
+        attempt = await db.scalar(
+            select(AIRecommendationAttempt)
+            .where(AIRecommendationAttempt.id == candidate.id)
+            .with_for_update()
+        )
+        if attempt is None or attempt.status in TERMINAL_ATTEMPT_STATUSES:
+            counters["skipped_terminal"] += 1
+            continue
+        if (
+            attempt.maintenance_lease_expires_at is not None
+            and attempt.maintenance_lease_expires_at > now
+        ):
+            counters["lease_prevented"] += 1
+            continue
+        lease_recovered = attempt.maintenance_lease_expires_at is not None
+        attempt.maintenance_lease_id = str(uuid.uuid4())
+        attempt.maintenance_lease_expires_at = now + timedelta(
+            seconds=settings.ai_reconciliation_lease_seconds
+        )
+        item = await db.get(AIRecommendation, attempt.recommendation_id)
+        case = await db.get(ManualReviewCase, item.review_case_id) if item else None
+        if (
+            not item
+            or not case
+            or not await db.get(ManualReviewEvidenceSnapshot, item.evidence_snapshot_id)
+        ):
+            counters["skipped_invalid"] += 1
+            _finish_reconciliation(attempt, now, "invalid_reconciliation_context")
+            continue
+        if case.locked:
+            counters["skipped_locked"] += 1
+            _audit(
+                db, item.requested_by_id, item, "ai_recommendation.reconciliation_skipped_locked"
+            )
+            _finish_reconciliation(attempt, now, "review_case_locked")
+            continue
+        if case.disposition and case.disposition.value == "cancelled" or item.status == "cancelled":
+            counters["skipped_cancelled"] += 1
+            _audit(
+                db, item.requested_by_id, item, "ai_recommendation.reconciliation_skipped_cancelled"
+            )
+            _finish_reconciliation(attempt, now, "review_case_cancelled")
+            continue
+        labels, allowed_hash = await _active_content_labels(db, item.taxonomy_version_id)
+        if (
+            case.taxonomy_version_id != item.taxonomy_version_id
+            or not labels
+            or allowed_hash != item.allowed_label_checksum
+        ):
+            counters["skipped_invalid"] += 1
+            _finish_reconciliation(attempt, now, "taxonomy_or_labels_changed")
+            continue
+        reservation = await db.scalar(
+            select(AIRecommendationDispatchReservation).where(
+                AIRecommendationDispatchReservation.recommendation_attempt_id == attempt.id
+            )
+        )
+        reason = _stale_reason(attempt, reservation, now, settings)
+        if reason is None:
+            _finish_reconciliation(attempt, now, "fresh")
+            continue
+        if lease_recovered:
+            _audit(db, item.requested_by_id, item, "ai_recommendation.maintenance_lease_recovered")
+        _audit(db, item.requested_by_id, item, f"ai_recommendation.stale_{attempt.status}_detected")
+        if reservation is not None and reservation.state in {"reserved", "dispatching"}:
+            reservation.state = "failed"
+            reservation.released_at = now
+            reservation.failure_reason = "stale_enqueue"
+            counters["released_reservations"] += 1
+            _audit(
+                db, item.requested_by_id, item, "ai_recommendation.dispatch_reservation_released"
+            )
+        attempt.status = "failed-transient"
+        attempt.failure_class = "transient"
+        attempt.retryable = True
+        attempt.failure_code = reason
+        attempt.failure_message = "Recommendation attempt did not complete"
+        attempt.failed_at = now
+        item.status = "failed"
+        item.failure_code = reason
+        item.failure_message = "Recommendation attempt did not complete"
+        item.completed_at = now
+        counters["failed_transient"] += 1
+        _audit(
+            db, item.requested_by_id, item, "ai_recommendation.attempt_failed_transiently", reason
+        )
+        _finish_reconciliation(attempt, now, reason)
+    return counters
+
+
+def _finish_reconciliation(attempt: AIRecommendationAttempt, now: datetime, reason: str) -> None:
+    attempt.reconciliation_count += 1
+    attempt.last_reconciled_at = now
+    attempt.last_reconciliation_reason = reason[:120]
+    attempt.maintenance_lease_id = None
+    attempt.maintenance_lease_expires_at = None
+
+
+def _stale_reason(
+    attempt: AIRecommendationAttempt,
+    reservation: AIRecommendationDispatchReservation | None,
+    now: datetime,
+    settings: Settings,
+) -> str | None:
+    def utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+    if attempt.status == "pending":
+        if reservation is not None and reservation.state in {"reserved", "dispatching"}:
+            if utc(reservation.reserved_at) <= now - timedelta(
+                seconds=settings.ai_reconciliation_pending_seconds
+            ):
+                return "stale_dispatch_reservation"
+            return None
+        if utc(attempt.requested_at) <= now - timedelta(
+            seconds=settings.ai_reconciliation_pending_seconds
+        ):
+            return "stale_pending"
+    if (
+        attempt.status == "dispatched"
+        and attempt.dispatched_at
+        and utc(attempt.dispatched_at)
+        <= now - timedelta(seconds=settings.ai_reconciliation_dispatched_seconds)
+    ):
+        return "stale_dispatched"
+    if (
+        attempt.status == "running"
+        and attempt.started_at
+        and utc(attempt.started_at)
+        <= now - timedelta(seconds=settings.ai_reconciliation_running_seconds)
+    ):
+        return "stale_running"
+    return None

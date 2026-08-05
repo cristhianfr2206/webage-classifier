@@ -519,6 +519,11 @@ class AIRecommendationAttempt(Base):
     )
     failure_code: Mapped[str | None] = mapped_column(String(80))
     failure_message: Mapped[str] = mapped_column(String(300), default="")
+    reconciliation_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_reconciliation_reason: Mapped[str] = mapped_column(String(120), default="")
+    maintenance_lease_id: Mapped[str | None] = mapped_column(String(50), index=True)
+    maintenance_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

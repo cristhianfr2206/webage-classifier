@@ -144,6 +144,29 @@ async def recommendation_detail(
     }
 
 
+@router.get("/maintenance/recommendations/status")
+async def recommendation_maintenance_status(_: AdminUser, db: Db) -> dict[str, int]:
+    now = datetime.now(UTC)
+    rows = list(
+        (
+            await db.scalars(
+                select(AIRecommendationAttempt).where(
+                    AIRecommendationAttempt.status.in_(("pending", "dispatched", "running"))
+                )
+            )
+        ).all()
+    )
+    return {
+        "pending": sum(row.status == "pending" for row in rows),
+        "dispatched": sum(row.status == "dispatched" for row in rows),
+        "running": sum(row.status == "running" for row in rows),
+        "active_leases": sum(
+            row.maintenance_lease_expires_at is not None and row.maintenance_lease_expires_at > now
+            for row in rows
+        ),
+    }
+
+
 @router.post("/recommendations/{recommendation_id}/cancel")
 async def cancel_case_recommendation(
     recommendation_id: uuid.UUID, _: Csrf, admin: AdminUser, db: Db

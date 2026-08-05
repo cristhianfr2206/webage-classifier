@@ -11,7 +11,11 @@ from sqlalchemy import select
 
 from app.ai_celery_app import ai_celery_app
 from app.ai_provider import AIProviderError
-from app.ai_recommendation_service import RecommendationError, execute_recommendation
+from app.ai_recommendation_service import (
+    RecommendationError,
+    execute_recommendation,
+    reconcile_stale_recommendation_attempts,
+)
 from app.ai_service import AIJobError, execute_ai_classification
 from app.config import get_settings
 from app.database import SessionLocal, engine
@@ -208,6 +212,18 @@ def execute_recommendation_task(
             await db.commit()
 
     _run(execute())
+
+
+@ai_celery_app.task(name="app.ai_tasks.reconcile_stale_recommendations")
+def reconcile_stale_recommendations() -> dict[str, int]:
+    async def reconcile() -> dict[str, int]:
+        async with SessionLocal() as db:
+            result = await reconcile_stale_recommendation_attempts(db, settings)
+            await db.commit()
+            return result
+
+    result = _run(reconcile())
+    return result if isinstance(result, dict) else {}
 
 
 for registered_name in tuple(ai_celery_app.tasks):
