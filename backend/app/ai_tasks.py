@@ -180,11 +180,18 @@ def recover_stale_ai() -> int:
     soft_time_limit=settings.ai_timeout_seconds + 5,
     time_limit=settings.ai_timeout_seconds + 10,
 )
-def execute_recommendation_task(self: Task, recommendation_id_value: str) -> None:
+def execute_recommendation_task(
+    self: Task, recommendation_id_value: str, attempt_id_value: str | None = None
+) -> None:
     try:
         recommendation_id = uuid.UUID(recommendation_id_value)
     except ValueError:
         logger.error("invalid_ai_recommendation_payload")
+        return
+    try:
+        attempt_id = uuid.UUID(attempt_id_value) if attempt_id_value else None
+    except ValueError:
+        logger.error("invalid_ai_recommendation_attempt_payload")
         return
 
     async def execute() -> None:
@@ -193,7 +200,7 @@ def execute_recommendation_task(self: Task, recommendation_id_value: str) -> Non
             if item is None or item.status in {"completed", "cancelled"}:
                 return
             try:
-                await execute_recommendation(db, settings, recommendation_id)
+                await execute_recommendation(db, settings, recommendation_id, attempt_id=attempt_id)
             except RecommendationError as exc:
                 item.status = "failed"
                 item.failure_code = str(exc)[:80]

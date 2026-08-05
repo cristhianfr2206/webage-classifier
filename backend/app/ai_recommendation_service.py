@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai_provider import (
+    AIProviderError,
     RecommendationOutput,
     RecommendationProvider,
     recommendation_provider_for,
@@ -18,6 +19,8 @@ from app.ai_provider import (
 from app.config import Settings
 from app.models import (
     AIRecommendation,
+    AIRecommendationAttempt,
+    AIRecommendationDispatchReservation,
     AIRecommendationUsageReservation,
     AuditLog,
     ManualReviewCase,
@@ -38,6 +41,24 @@ TERMINAL = {
     "rejected-budget",
     "rejected-rate-limit",
 }
+TERMINAL_ATTEMPT_STATUSES = {
+    "completed",
+    "failed-transient",
+    "failed-permanent",
+    "cancelled",
+    "rejected",
+}
+EXECUTABLE_ATTEMPT_STATUSES = {"pending", "dispatched"}
+TRANSIENT_FAILURES = {
+    "provider_timeout",
+    "provider_unavailable",
+    "provider_rate_limited",
+    "worker_lost",
+}
+
+
+def failure_class(code: str) -> tuple[str, bool]:
+    return ("transient", True) if code in TRANSIENT_FAILURES else ("permanent", False)
 
 
 class RecommendationError(ValueError):
@@ -70,6 +91,25 @@ def _audit(
     )
 
 
+async def _active_content_labels(
+    db: AsyncSession, taxonomy_version_id: uuid.UUID
+) -> tuple[list[TaxonomyLabel], str]:
+    labels = list(
+        (
+            await db.scalars(
+                select(TaxonomyLabel)
+                .where(
+                    TaxonomyLabel.taxonomy_version_id == taxonomy_version_id,
+                    TaxonomyLabel.dimension == TaxonomyDimension.CONTENT,
+                    TaxonomyLabel.status == TaxonomyLabelStatus.ACTIVE,
+                )
+                .order_by(TaxonomyLabel.slug)
+            )
+        ).all()
+    )
+    return labels, _hash([label.slug for label in labels])
+
+
 async def request_recommendation(
     db: AsyncSession,
     settings: Settings,
@@ -97,23 +137,9 @@ async def request_recommendation(
     snapshot = await db.get(ManualReviewEvidenceSnapshot, case.evidence_snapshot_id)
     if snapshot is None:
         raise RecommendationError("review_case_missing_snapshot")
-    labels = list(
-        (
-            await db.scalars(
-                select(TaxonomyLabel)
-                .where(
-                    TaxonomyLabel.taxonomy_version_id == case.taxonomy_version_id,
-                    TaxonomyLabel.dimension == TaxonomyDimension.CONTENT,
-                    TaxonomyLabel.status == TaxonomyLabelStatus.ACTIVE,
-                )
-                .order_by(TaxonomyLabel.slug)
-            )
-        ).all()
-    )
+    labels, allowed_hash = await _active_content_labels(db, case.taxonomy_version_id)
     if not labels:
         raise RecommendationError("no_active_content_labels")
-    allowed = [item.slug for item in labels]
-    allowed_hash = _hash(allowed)
     existing = await db.scalar(
         select(AIRecommendation).where(
             AIRecommendation.review_case_id == case.id,
@@ -161,7 +187,182 @@ async def request_recommendation(
     )
     _audit(db, actor_id, item, "ai_recommendation.requested")
     _audit(db, actor_id, item, "ai_recommendation.budget_reserved")
+    db.add(
+        AIRecommendationAttempt(
+            recommendation_id=item.id,
+            attempt_number=1,
+            provider=item.provider,
+            model=item.model,
+            model_version=item.model_version,
+            idempotency_key=idempotency_key,
+            requested_by_id=actor_id,
+        )
+    )
     return item
+
+
+async def retry_recommendation(
+    db: AsyncSession,
+    settings: Settings,
+    *,
+    recommendation_id: uuid.UUID,
+    actor_id: uuid.UUID,
+    expected_revision: int,
+    idempotency_key: str,
+) -> AIRecommendationAttempt:
+    if not settings.ai_enabled or settings.ai_recommendation_mode != "manual_only":
+        raise RecommendationError("ai_disabled")
+    item = await db.scalar(
+        select(AIRecommendation).where(AIRecommendation.id == recommendation_id).with_for_update()
+    )
+    if item is None or item.requested_by_id != actor_id:
+        raise RecommendationError("missing_recommendation")
+    case = await db.get(ManualReviewCase, item.review_case_id)
+    if case is None or case.locked:
+        raise RecommendationError("review_case_locked")
+    if case.disposition and case.disposition.value == "cancelled":
+        raise RecommendationError("review_case_cancelled")
+    if case.revision != expected_revision:
+        raise RecommendationError("review_revision_conflict")
+    if case.taxonomy_version_id != item.taxonomy_version_id:
+        raise RecommendationError("taxonomy_version_changed")
+    if case.evidence_snapshot_id != item.evidence_snapshot_id or not await db.get(
+        ManualReviewEvidenceSnapshot, item.evidence_snapshot_id
+    ):
+        raise RecommendationError("review_case_missing_snapshot")
+    labels, allowed_hash = await _active_content_labels(db, item.taxonomy_version_id)
+    if not labels or allowed_hash != item.allowed_label_checksum:
+        raise RecommendationError("allowed_labels_changed")
+    existing = await db.scalar(
+        select(AIRecommendationAttempt).where(
+            AIRecommendationAttempt.recommendation_id == item.id,
+            AIRecommendationAttempt.idempotency_key == idempotency_key,
+            AIRecommendationAttempt.retry_of_attempt_id.is_not(None),
+        )
+    )
+    if existing is not None:
+        return existing
+    latest = await db.scalar(
+        select(AIRecommendationAttempt)
+        .where(AIRecommendationAttempt.recommendation_id == item.id)
+        .order_by(AIRecommendationAttempt.attempt_number.desc())
+    )
+    if latest is None or not latest.retryable or latest.status != "failed-transient":
+        raise RecommendationError("recommendation_not_retryable")
+    if latest.attempt_number > settings.ai_max_retries:
+        raise RecommendationError("retry_limit_exceeded")
+    attempt = AIRecommendationAttempt(
+        recommendation_id=item.id,
+        attempt_number=latest.attempt_number + 1,
+        provider=item.provider,
+        model=item.model,
+        model_version=item.model_version,
+        idempotency_key=idempotency_key,
+        requested_by_id=actor_id,
+        retry_of_attempt_id=latest.id,
+    )
+    db.add(attempt)
+    await db.flush()
+    item.status = "pending"
+    item.failure_code = None
+    item.failure_message = ""
+    item.completed_at = None
+    item.cancelled_at = None
+    item.retry_count = latest.attempt_number
+    _audit(db, actor_id, item, "ai_recommendation.retry_requested")
+    _audit(db, actor_id, item, "ai_recommendation.attempt_created")
+    return attempt
+
+
+async def reserve_attempt_dispatch(
+    db: AsyncSession, *, attempt_id: uuid.UUID, queue_name: str
+) -> tuple[AIRecommendationDispatchReservation, bool]:
+    if queue_name not in {"ai", "ai_realtime"}:
+        raise RecommendationError("invalid_recommendation_queue")
+    attempt = await db.scalar(
+        select(AIRecommendationAttempt)
+        .where(AIRecommendationAttempt.id == attempt_id)
+        .with_for_update()
+    )
+    if attempt is None:
+        raise RecommendationError("attempt_not_dispatchable")
+    existing = await db.scalar(
+        select(AIRecommendationDispatchReservation).where(
+            AIRecommendationDispatchReservation.recommendation_attempt_id == attempt.id
+        )
+    )
+    if existing:
+        if existing.state == "failed":
+            task_id = str(uuid.uuid4())
+            existing.task_id = task_id
+            existing.queue_name = queue_name
+            existing.state = "dispatching"
+            existing.failure_reason = ""
+            existing.released_at = None
+            attempt.task_id = task_id
+            attempt.queue_name = queue_name
+            attempt.status = "dispatched"
+            attempt.dispatched_at = datetime.now(UTC)
+            item = await db.get(AIRecommendation, attempt.recommendation_id)
+            if item is not None:
+                _audit(db, item.requested_by_id, item, "ai_recommendation.dispatch_reserved")
+            return existing, True
+        item = await db.get(AIRecommendation, attempt.recommendation_id)
+        if item is not None:
+            _audit(db, item.requested_by_id, item, "ai_recommendation.duplicate_dispatch_prevented")
+        return existing, False
+    if attempt.status != "pending":
+        raise RecommendationError("attempt_not_dispatchable")
+    task_id = str(uuid.uuid4())
+    reservation = AIRecommendationDispatchReservation(
+        recommendation_attempt_id=attempt.id,
+        dispatch_key=_hash([str(attempt.id), attempt.attempt_number]),
+        task_id=task_id,
+        queue_name=queue_name,
+        state="dispatching",
+    )
+    db.add(reservation)
+    attempt.task_id = task_id
+    attempt.queue_name = queue_name
+    attempt.status = "dispatched"
+    attempt.dispatched_at = datetime.now(UTC)
+    item = await db.get(AIRecommendation, attempt.recommendation_id)
+    if item:
+        _audit(db, item.requested_by_id, item, "ai_recommendation.dispatch_reserved")
+    return reservation, True
+
+
+async def mark_dispatch_result(
+    db: AsyncSession,
+    *,
+    reservation_id: uuid.UUID,
+    succeeded: bool,
+) -> None:
+    reservation = await db.scalar(
+        select(AIRecommendationDispatchReservation)
+        .where(AIRecommendationDispatchReservation.id == reservation_id)
+        .with_for_update()
+    )
+    if reservation is None or reservation.state != "dispatching":
+        return
+    attempt = await db.get(AIRecommendationAttempt, reservation.recommendation_attempt_id)
+    item = await db.get(AIRecommendation, attempt.recommendation_id) if attempt else None
+    if succeeded:
+        reservation.state = "dispatched"
+        reservation.dispatched_at = datetime.now(UTC)
+        if item is not None:
+            _audit(db, item.requested_by_id, item, "ai_recommendation.dispatch_succeeded")
+    else:
+        reservation.state = "failed"
+        reservation.released_at = datetime.now(UTC)
+        reservation.failure_reason = "enqueue_failed"
+        if attempt is not None:
+            attempt.status = "pending"
+            attempt.task_id = None
+            attempt.queue_name = None
+            attempt.dispatched_at = None
+        if item is not None:
+            _audit(db, item.requested_by_id, item, "ai_recommendation.dispatch_failed")
 
 
 async def execute_recommendation(
@@ -169,6 +370,7 @@ async def execute_recommendation(
     settings: Settings,
     recommendation_id: uuid.UUID,
     provider: RecommendationProvider | None = None,
+    attempt_id: uuid.UUID | None = None,
 ) -> AIRecommendation:
     item = await db.scalar(
         select(AIRecommendation).where(AIRecommendation.id == recommendation_id).with_for_update()
@@ -177,13 +379,33 @@ async def execute_recommendation(
         raise RecommendationError("missing_recommendation")
     if item.status in TERMINAL:
         return item
+    attempt_query = select(AIRecommendationAttempt).where(
+        AIRecommendationAttempt.recommendation_id == item.id
+    )
+    if attempt_id is not None:
+        attempt_query = attempt_query.where(AIRecommendationAttempt.id == attempt_id)
+    else:
+        attempt_query = attempt_query.order_by(AIRecommendationAttempt.attempt_number.desc())
+    attempt = await db.scalar(attempt_query)
+    if attempt is None or attempt.status in TERMINAL_ATTEMPT_STATUSES:
+        _audit(db, item.requested_by_id, item, "ai_recommendation.duplicate_execution_ignored")
+        return item
     case = await db.get(ManualReviewCase, item.review_case_id)
-    if not case or case.locked:
-        item.status = "rejected-case-locked"
-        item.failure_code = "review_case_locked"
+    if not case or case.locked or case.disposition and case.disposition.value == "cancelled":
+        code = "review_case_locked" if not case or case.locked else "review_case_cancelled"
+        item.status = "rejected-case-locked" if code == "review_case_locked" else "failed"
+        item.failure_code = code
+        attempt.status = "rejected"
+        attempt.failure_class, attempt.retryable = failure_class(code)
+        attempt.failure_code = code
+        attempt.failure_message = "Recommendation cannot run for this review case"
+        attempt.failed_at = datetime.now(UTC)
+        _audit(db, item.requested_by_id, item, "ai_recommendation.attempt_failed_permanently")
         return item
-    if item.status == "cancelled":
+    if item.status == "cancelled" or attempt.status == "cancelled":
         return item
+    if attempt.status not in EXECUTABLE_ATTEMPT_STATUSES:
+        raise RecommendationError("invalid_attempt_transition")
     snapshot = await db.get(ManualReviewEvidenceSnapshot, item.evidence_snapshot_id)
     labels = list(
         (
@@ -200,8 +422,11 @@ async def execute_recommendation(
         raise RecommendationError("missing_snapshot")
     allowed = sorted(label.slug for label in labels)
     item.status = "running"
+    attempt.status = "running"
+    attempt.started_at = datetime.now(UTC)
     item.started_at = datetime.now(UTC)
     _audit(db, item.requested_by_id, item, "ai_recommendation.started")
+    _audit(db, item.requested_by_id, item, "ai_recommendation.attempt_started")
     try:
         result = await (provider or recommendation_provider_for(settings)).recommend(
             snapshot.payload, allowed
@@ -213,6 +438,8 @@ async def execute_recommendation(
         if any(slug not in allowed for slug in requested):
             raise RecommendationError("invalid_label")
         item.status = "completed"
+        attempt.status = "completed"
+        attempt.completed_at = datetime.now(UTC)
         item.result = output.model_dump()
         item.confidence = round(output.confidence * 100)
         item.uncertainty_reason = output.uncertainty_reason
@@ -223,18 +450,50 @@ async def execute_recommendation(
         item.completed_at = datetime.now(UTC)
         item.audit_disposition = "advisory_only"
         _audit(db, item.requested_by_id, item, "ai_recommendation.completed")
+        _audit(db, item.requested_by_id, item, "ai_recommendation.attempt_completed")
     except RecommendationError as exc:
         item.status = "rejected-invalid-output"
         item.failure_code = str(exc)[:80]
         item.failure_message = "Provider output was rejected"
         item.completed_at = datetime.now(UTC)
+        attempt.status = "failed-permanent"
+        attempt.failure_class, attempt.retryable = failure_class(str(exc))
+        attempt.failure_code = str(exc)[:80]
+        attempt.failure_message = "Provider output was rejected"
+        attempt.failed_at = datetime.now(UTC)
         _audit(db, item.requested_by_id, item, "ai_recommendation.invalid_output", str(exc))
+        _audit(db, item.requested_by_id, item, "ai_recommendation.attempt_failed_permanently")
+    except AIProviderError as exc:
+        item.status = "failed"
+        item.failure_code = str(exc)[:80]
+        item.failure_message = "Provider request failed"
+        item.completed_at = datetime.now(UTC)
+        attempt.failure_class, attempt.retryable = failure_class(str(exc))
+        attempt.status = "failed-transient" if attempt.retryable else "failed-permanent"
+        attempt.failure_code = str(exc)[:80]
+        attempt.failure_message = "Provider request failed"
+        attempt.failed_at = datetime.now(UTC)
+        _audit(db, item.requested_by_id, item, "ai_recommendation.failed")
+        _audit(
+            db,
+            item.requested_by_id,
+            item,
+            "ai_recommendation.attempt_failed_transiently"
+            if attempt.retryable
+            else "ai_recommendation.attempt_failed_permanently",
+        )
     except Exception:
         item.status = "failed"
         item.failure_code = "provider_failed"
         item.failure_message = "Provider request failed"
         item.completed_at = datetime.now(UTC)
+        attempt.failure_class, attempt.retryable = failure_class("provider_failed")
+        attempt.status = "failed-permanent"
+        attempt.failure_code = "provider_failed"
+        attempt.failure_message = "Provider request failed"
+        attempt.failed_at = datetime.now(UTC)
         _audit(db, item.requested_by_id, item, "ai_recommendation.failed")
+        _audit(db, item.requested_by_id, item, "ai_recommendation.attempt_failed_permanently")
     return item
 
 
@@ -251,5 +510,14 @@ async def cancel_recommendation(
         raise RecommendationError("recommendation_not_active")
     item.status = "cancelled"
     item.cancelled_at = datetime.now(UTC)
+    attempt = await db.scalar(
+        select(AIRecommendationAttempt)
+        .where(AIRecommendationAttempt.recommendation_id == item.id)
+        .order_by(AIRecommendationAttempt.attempt_number.desc())
+    )
+    if attempt is not None and attempt.status in {"pending", "dispatched"}:
+        attempt.status = "cancelled"
+        attempt.cancelled_at = datetime.now(UTC)
     _audit(db, actor_id, item, "ai_recommendation.cancelled")
+    _audit(db, actor_id, item, "ai_recommendation.attempt_cancelled")
     return item

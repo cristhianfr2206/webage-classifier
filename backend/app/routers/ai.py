@@ -8,7 +8,10 @@ from app.ai_queueing import dispatch_ai, dispatch_recommendation, revoke_ai
 from app.ai_recommendation_service import (
     RecommendationError,
     cancel_recommendation,
+    mark_dispatch_result,
     request_recommendation,
+    reserve_attempt_dispatch,
+    retry_recommendation,
 )
 from app.config import get_settings
 from app.dependencies import AdminUser, Csrf, CurrentUser, Db
@@ -16,6 +19,7 @@ from app.models import (
     AIClassification,
     AIConfiguration,
     AIRecommendation,
+    AIRecommendationAttempt,
     AIStatus,
     AuditLog,
     ClassificationRun,
@@ -40,6 +44,16 @@ router = APIRouter(prefix="/api/ai", tags=["ai"])
 ACTIVE = (AIStatus.PENDING, AIStatus.RETRYING, AIStatus.RUNNING)
 
 
+def _review_request_payload(payload: dict[str, object]) -> tuple[int, str]:
+    revision_value = payload["expected_revision"]
+    if not isinstance(revision_value, int | str):
+        raise ValueError("expected_revision must be an integer")
+    idempotency_key = str(payload["idempotency_key"]).strip()[:120]
+    if not idempotency_key:
+        raise ValueError("idempotency_key is required")
+    return int(revision_value), idempotency_key
+
+
 @router.post("/review-cases/{case_id}/recommendations", status_code=status.HTTP_202_ACCEPTED)
 async def request_case_recommendation(
     case_id: uuid.UUID,
@@ -49,11 +63,7 @@ async def request_case_recommendation(
     db: Db,
 ) -> dict[str, object]:
     try:
-        revision_value = payload["expected_revision"]
-        if not isinstance(revision_value, int | str):
-            raise ValueError("expected_revision must be an integer")
-        expected_revision = int(revision_value)
-        idempotency_key = str(payload["idempotency_key"])[:120]
+        expected_revision, idempotency_key = _review_request_payload(payload)
         item = await request_recommendation(
             db,
             get_settings(),
@@ -62,8 +72,33 @@ async def request_case_recommendation(
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
         )
+        attempt = await db.scalar(
+            select(AIRecommendationAttempt)
+            .where(AIRecommendationAttempt.recommendation_id == item.id)
+            .order_by(AIRecommendationAttempt.attempt_number.desc())
+        )
+        if attempt is None:
+            raise RecommendationError("attempt_missing")
+        dispatch, should_dispatch = await reserve_attempt_dispatch(
+            db, attempt_id=attempt.id, queue_name=QueueName.AI_REALTIME.value
+        )
         await db.commit()
-        await dispatch_recommendation(item, QueueName.AI_REALTIME)
+        if should_dispatch:
+            try:
+                await dispatch_recommendation(
+                    item,
+                    QueueName.AI_REALTIME,
+                    task_id=dispatch.task_id,
+                    attempt_id=str(attempt.id),
+                )
+            except Exception as exc:
+                await mark_dispatch_result(db, reservation_id=dispatch.id, succeeded=False)
+                await db.commit()
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, "AI queue unavailable"
+                ) from exc
+            await mark_dispatch_result(db, reservation_id=dispatch.id, succeeded=True)
+            await db.commit()
     except (KeyError, ValueError, RecommendationError) as exc:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
@@ -93,6 +128,22 @@ async def list_case_recommendations(
     ]
 
 
+@router.get("/recommendations/{recommendation_id}")
+async def recommendation_detail(
+    recommendation_id: uuid.UUID, _: AdminUser, db: Db
+) -> dict[str, object]:
+    row = await db.get(AIRecommendation, recommendation_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Recommendation not found")
+    return {
+        "id": row.id,
+        "status": row.status,
+        "confidence": row.confidence,
+        "result": row.result,
+        "failure_code": row.failure_code,
+    }
+
+
 @router.post("/recommendations/{recommendation_id}/cancel")
 async def cancel_case_recommendation(
     recommendation_id: uuid.UUID, _: Csrf, admin: AdminUser, db: Db
@@ -105,6 +156,51 @@ async def cancel_case_recommendation(
     except RecommendationError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
     return {"id": item.id, "status": item.status}
+
+
+@router.post("/recommendations/{recommendation_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_case_recommendation(
+    recommendation_id: uuid.UUID, payload: dict[str, object], _: Csrf, admin: AdminUser, db: Db
+) -> dict[str, object]:
+    try:
+        expected_revision, idempotency_key = _review_request_payload(payload)
+        attempt = await retry_recommendation(
+            db,
+            get_settings(),
+            recommendation_id=recommendation_id,
+            actor_id=admin.id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+        )
+        dispatch, should_dispatch = await reserve_attempt_dispatch(
+            db, attempt_id=attempt.id, queue_name=QueueName.AI_REALTIME.value
+        )
+        item = await db.get(AIRecommendation, recommendation_id)
+        await db.commit()
+        if item is not None and should_dispatch:
+            try:
+                await dispatch_recommendation(
+                    item,
+                    QueueName.AI_REALTIME,
+                    task_id=dispatch.task_id,
+                    attempt_id=str(attempt.id),
+                )
+            except Exception as exc:
+                await mark_dispatch_result(db, reservation_id=dispatch.id, succeeded=False)
+                await db.commit()
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, "AI queue unavailable"
+                ) from exc
+            await mark_dispatch_result(db, reservation_id=dispatch.id, succeeded=True)
+            await db.commit()
+    except (KeyError, ValueError, RecommendationError) as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)[:120]) from exc
+    return {
+        "recommendation_id": recommendation_id,
+        "attempt": attempt.attempt_number,
+        "status": attempt.status,
+    }
 
 
 async def _authorized(ai_id: uuid.UUID, user: CurrentUser, db: Db) -> AIClassification:

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app import ai_tasks  # noqa: F401  # Registers isolated task definitions.
 from app.ai_celery_app import ai_celery_app
 from app.ai_provider import (
+    AIProviderError,
     DisabledRecommendationProvider,
     FakeRecommendationProvider,
     ProviderResult,
@@ -21,7 +22,11 @@ from app.ai_recommendation_service import (
     RecommendationError,
     cancel_recommendation,
     execute_recommendation,
+    failure_class,
+    mark_dispatch_result,
     request_recommendation,
+    reserve_attempt_dispatch,
+    retry_recommendation,
 )
 from app.config import Settings, get_settings
 from app.database import get_db
@@ -29,6 +34,8 @@ from app.dependencies import current_user
 from app.main import app
 from app.models import (
     AIRecommendation,
+    AIRecommendationAttempt,
+    AIRecommendationDispatchReservation,
     AIRecommendationUsageReservation,
     AuditLog,
     Base,
@@ -130,7 +137,7 @@ async def request_api(
     headers = {"X-CSRF-Token": "token"} if csrf else {}
     cookies = {"csrf_token": "token"} if csrf else {}
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
+        transport=httpx.ASGITransport(app=app), base_url=f"http://{get_settings().allowed_hosts[0]}"
     ) as client:
         return await client.request(method, path, json=payload, headers=headers, cookies=cookies)
 
@@ -275,7 +282,7 @@ async def test_execution_fake_disabled_and_invalid_output_are_controlled_and_adv
             db, recommendation_settings(), disabled.id, DisabledRecommendationProvider()
         )
         assert failed.status == "failed"
-        assert failed.failure_code == "provider_failed"
+        assert failed.failure_code == "ai_disabled"
         assert failed.failure_message == "Provider request failed"
 
         class InvalidProvider:
@@ -353,6 +360,224 @@ async def test_duplicate_execution_does_not_call_provider_after_terminal_complet
         assert provider.calls == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected_class", "retryable"),
+    [
+        ("provider_timeout", "transient", True),
+        ("provider_unavailable", "transient", True),
+        ("provider_rate_limited", "transient", True),
+        ("worker_lost", "transient", True),
+        ("invalid_output", "permanent", False),
+        ("provider_authentication", "permanent", False),
+        ("unexpected_error", "permanent", False),
+    ],
+)
+async def test_failure_classification_defaults_unknown_failures_to_permanent(
+    code: str, expected_class: str, retryable: bool
+) -> None:
+    assert failure_class(code) == (expected_class, retryable)
+
+
+@pytest.mark.asyncio
+async def test_retry_creates_a_new_attempt_and_preserves_transient_failure(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    class TimeoutProvider:
+        async def recommend(
+            self, snapshot: dict[str, object], allowed_labels: list[str]
+        ) -> ProviderResult:
+            raise AIProviderError("provider_timeout", retryable=True)
+
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        item = await request_recommendation(
+            db,
+            recommendation_settings(ai_max_retries=1),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="initial-timeout",
+        )
+        await execute_recommendation(db, recommendation_settings(), item.id, TimeoutProvider())
+        first = await db.scalar(
+            select(AIRecommendationAttempt).where(
+                AIRecommendationAttempt.recommendation_id == item.id,
+                AIRecommendationAttempt.attempt_number == 1,
+            )
+        )
+        assert first is not None
+        assert (first.status, first.failure_class, first.retryable) == (
+            "failed-transient",
+            "transient",
+            True,
+        )
+        retry = await retry_recommendation(
+            db,
+            recommendation_settings(ai_max_retries=1),
+            recommendation_id=item.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="retry-one",
+        )
+        duplicate = await retry_recommendation(
+            db,
+            recommendation_settings(ai_max_retries=1),
+            recommendation_id=item.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="retry-one",
+        )
+        assert retry.id == duplicate.id
+        assert retry.attempt_number == 2
+        assert retry.retry_of_attempt_id == first.id
+        assert (
+            await db.scalar(
+                select(func.count(AIRecommendationAttempt.id)).where(
+                    AIRecommendationAttempt.recommendation_id == item.id
+                )
+            )
+            == 2
+        )
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_locked_case_and_retry_limit_are_rejected(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        item = await request_recommendation(
+            db,
+            recommendation_settings(ai_max_retries=0),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="permanent",
+        )
+        await execute_recommendation(
+            db, recommendation_settings(), item.id, DisabledRecommendationProvider()
+        )
+        with pytest.raises(RecommendationError, match="recommendation_not_retryable"):
+            await retry_recommendation(
+                db,
+                recommendation_settings(),
+                recommendation_id=item.id,
+                actor_id=actor.id,
+                expected_revision=1,
+                idempotency_key="never",
+            )
+        transient = await request_recommendation(
+            db,
+            recommendation_settings(ai_max_retries=0),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="transient-limit",
+        )
+
+        class TimeoutProvider:
+            async def recommend(
+                self, snapshot: dict[str, object], allowed_labels: list[str]
+            ) -> ProviderResult:
+                raise AIProviderError("provider_timeout", retryable=True)
+
+        await execute_recommendation(db, recommendation_settings(), transient.id, TimeoutProvider())
+        with pytest.raises(RecommendationError, match="retry_limit_exceeded"):
+            await retry_recommendation(
+                db,
+                recommendation_settings(ai_max_retries=0),
+                recommendation_id=transient.id,
+                actor_id=actor.id,
+                expected_revision=1,
+                idempotency_key="limit",
+            )
+        case.locked = True
+        case.disposition = ReviewDisposition.RESOLVED
+        with pytest.raises(RecommendationError, match="review_case_locked"):
+            await retry_recommendation(
+                db,
+                recommendation_settings(),
+                recommendation_id=transient.id,
+                actor_id=actor.id,
+                expected_revision=1,
+                idempotency_key="locked",
+            )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_reservation_is_persistent_idempotent_and_recoverable(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        item = await request_recommendation(
+            db,
+            recommendation_settings(),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="dispatch",
+        )
+        attempt = await db.scalar(
+            select(AIRecommendationAttempt).where(
+                AIRecommendationAttempt.recommendation_id == item.id
+            )
+        )
+        assert attempt is not None
+        reservation, dispatch_now = await reserve_attempt_dispatch(
+            db, attempt_id=attempt.id, queue_name="ai"
+        )
+        assert dispatch_now is True
+        assert reservation.state == "dispatching"
+        duplicate, dispatch_again = await reserve_attempt_dispatch(
+            db, attempt_id=attempt.id, queue_name="ai"
+        )
+        assert duplicate.id == reservation.id
+        assert dispatch_again is False
+        await mark_dispatch_result(db, reservation_id=reservation.id, succeeded=False)
+        assert reservation.state == "failed"
+        recovered, dispatch_recovered = await reserve_attempt_dispatch(
+            db, attempt_id=attempt.id, queue_name="ai_realtime"
+        )
+        assert recovered.id == reservation.id
+        assert dispatch_recovered is True
+        assert recovered.queue_name == "ai_realtime"
+        await mark_dispatch_result(db, reservation_id=reservation.id, succeeded=True)
+        assert recovered.state == "dispatched"
+        assert await db.scalar(select(func.count(AIRecommendationDispatchReservation.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_prevents_attempt_completion_and_mutations(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with maker() as db:
+        actor, case, _, _, _ = await seed_case(db)
+        item = await request_recommendation(
+            db,
+            recommendation_settings(),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="cancel-attempt",
+        )
+        attempt = await db.scalar(
+            select(AIRecommendationAttempt).where(
+                AIRecommendationAttempt.recommendation_id == item.id
+            )
+        )
+        assert attempt is not None
+        await cancel_recommendation(db, recommendation_id=item.id, actor_id=actor.id)
+        assert attempt.status == "cancelled"
+        await execute_recommendation(
+            db, recommendation_settings(), item.id, FakeRecommendationProvider()
+        )
+        assert item.status == "cancelled"
+        assert await db.scalar(select(func.count(WebsiteClassification.id))) == 0
+        assert await db.scalar(select(func.count(ClassificationAssessment.id))) == 0
+
+
 def test_task_is_ai_isolated_and_registered() -> None:
     assert "app.ai_tasks.execute_recommendation" in ai_celery_app.tasks
     route = ai_celery_app.conf.task_routes["app.ai_tasks.execute_recommendation"]
@@ -376,7 +601,8 @@ async def test_existing_api_request_list_cancel_contract_is_authenticated_and_sa
 
     dispatched: list[uuid.UUID] = []
 
-    async def no_dispatch(item: AIRecommendation, _: object) -> None:
+    async def no_dispatch(item: AIRecommendation, queue: object, **kwargs: object) -> None:
+        del queue, kwargs
         dispatched.append(item.id)
 
     app.dependency_overrides[get_db] = database
@@ -384,11 +610,10 @@ async def test_existing_api_request_list_cancel_contract_is_authenticated_and_sa
     monkeypatch.setattr("app.routers.ai.dispatch_recommendation", no_dispatch)
     try:
         path = f"/api/ai/review-cases/{case_id}/recommendations"
-        assert (
-            await request_api(
-                "POST", path, payload={"expected_revision": 1, "idempotency_key": "anonymous"}
-            )
-        ).status_code == 401
+        anonymous = await request_api(
+            "POST", path, payload={"expected_revision": 1, "idempotency_key": "anonymous"}
+        )
+        assert anonymous.status_code == 401, anonymous.text
         viewer = User(
             id=uuid.uuid4(),
             email=f"viewer-{uuid.uuid4()}@example.test",
@@ -421,7 +646,7 @@ async def test_existing_api_request_list_cancel_contract_is_authenticated_and_sa
         )
         assert duplicate.status_code == 202
         assert duplicate.json()["id"] == created.json()["id"]
-        assert dispatched == [recommendation_id, recommendation_id]
+        assert dispatched == [recommendation_id]
         listed = await request_api("GET", path)
         assert listed.status_code == 200
         assert listed.json()[0]["id"] == str(recommendation_id)
@@ -463,5 +688,64 @@ async def test_recommendation_api_fails_closed_when_ai_disabled(
         )
         assert response.status_code == 409
         assert response.json()["detail"] == "ai_disabled"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_retry_and_detail_api_are_idempotent_and_csrf_protected(
+    maker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class TimeoutProvider:
+        async def recommend(
+            self, snapshot: dict[str, object], allowed_labels: list[str]
+        ) -> ProviderResult:
+            raise AIProviderError("provider_timeout", retryable=True)
+
+    async with maker() as seed_db:
+        actor, case, _, _, _ = await seed_case(seed_db)
+        actor.role = Role.ADMIN
+        item = await request_recommendation(
+            seed_db,
+            recommendation_settings(ai_max_retries=1),
+            case_id=case.id,
+            actor_id=actor.id,
+            expected_revision=1,
+            idempotency_key="retry-api-initial",
+        )
+        await execute_recommendation(seed_db, recommendation_settings(), item.id, TimeoutProvider())
+        await seed_db.commit()
+        recommendation_id = item.id
+
+    async def database() -> AsyncIterator[AsyncSession]:
+        async with maker() as db:
+            yield db
+
+    dispatched: list[str] = []
+
+    async def no_dispatch(item: AIRecommendation, queue: object, **kwargs: object) -> None:
+        del item, queue
+        dispatched.append(str(kwargs["attempt_id"]))
+
+    app.dependency_overrides[get_db] = database
+    app.dependency_overrides[current_user] = lambda: actor
+    monkeypatch.setattr("app.routers.ai.get_settings", recommendation_settings)
+    monkeypatch.setattr("app.routers.ai.dispatch_recommendation", no_dispatch)
+    try:
+        retry_path = f"/api/ai/recommendations/{recommendation_id}/retry"
+        payload = {"expected_revision": 1, "idempotency_key": "retry-api"}
+        assert (
+            await request_api("POST", retry_path, payload=payload, csrf=False)
+        ).status_code == 403
+        first = await request_api("POST", retry_path, payload=payload)
+        assert first.status_code == 202, first.text
+        duplicate = await request_api("POST", retry_path, payload=payload)
+        assert duplicate.status_code == 202
+        assert duplicate.json()["attempt"] == first.json()["attempt"] == 2
+        assert len(dispatched) == 1
+        detail = await request_api("GET", f"/api/ai/recommendations/{recommendation_id}")
+        assert detail.status_code == 200
+        assert "prompt" not in str(detail.json()).lower()
+        assert "api_key" not in str(detail.json()).lower()
     finally:
         app.dependency_overrides.clear()

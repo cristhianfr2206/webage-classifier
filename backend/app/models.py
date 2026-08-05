@@ -483,6 +483,73 @@ class AIRecommendationUsageReservation(Base):
     )
 
 
+class AIRecommendationAttempt(Base):
+    __tablename__ = "ai_recommendation_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "recommendation_id", "attempt_number", name="uq_ai_recommendation_attempt"
+        ),
+        CheckConstraint("attempt_number >= 1", name="ck_ai_recommendation_attempt_number"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recommendation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_recommendations.id", ondelete="CASCADE"), index=True
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    failure_class: Mapped[str | None] = mapped_column(String(32))
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str] = mapped_column(String(120))
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(120))
+    task_id: Mapped[str | None] = mapped_column(String(50), unique=True)
+    queue_name: Mapped[str | None] = mapped_column(String(40))
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retry_of_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ai_recommendation_attempts.id")
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    failure_message: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AIRecommendationDispatchReservation(Base):
+    __tablename__ = "ai_recommendation_dispatch_reservations"
+    __table_args__ = (
+        UniqueConstraint("recommendation_attempt_id", name="uq_ai_recommendation_attempt_dispatch"),
+        CheckConstraint(
+            "queue_name IN ('ai', 'ai_realtime')",
+            name="ck_ai_recommendation_dispatch_queue",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recommendation_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_recommendation_attempts.id", ondelete="CASCADE"), index=True
+    )
+    dispatch_key: Mapped[str] = mapped_column(String(64), unique=True)
+    task_id: Mapped[str] = mapped_column(String(50), unique=True)
+    queue_name: Mapped[str] = mapped_column(String(40))
+    state: Mapped[str] = mapped_column(String(20), default="reserved", index=True)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str] = mapped_column(String(160), default="")
+
+
 class RulesetVersion(Base):
     __tablename__ = "ruleset_versions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
